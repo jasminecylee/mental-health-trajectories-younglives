@@ -1,0 +1,24 @@
+# ---- Data: never commit licensed Young Lives files ----
+*.csv
+*.dta
+*.sav
+*.xlsx
+*.xls
+*.rds
+*.RData
+data/
+raw/
+
+# ---- R / RStudio junk ----
+.Rproj.user/
+.Rhistory
+.Ruserdata
+
+# ---- Outputs ----
+outputs/
+figures/
+*.log
+
+# ---- OS clutter ----
+.DS_Store
+Thumbs.db
