@@ -1,5 +1,5 @@
 ---
-title: "preprocessing"
+title: "Mental health trajectories of religious majority and minority youth: data pre-processing"
 format: 
   html: 
     toc: true
@@ -14,14 +14,11 @@ execute:
   message: false
 ---
 
-# Pre-processing
+This Quarto document pre-processes data from the Young Lives project, accessed via the UK Data Service on 4th August, 2026.
 
-This Quarto document pre-processes data from the Young Lives project, accessed via the UK Data Service.
-
-### Set-up
+# Set up
 
 ```{r setup}
-#| label: setup
 #| include: false
 
 # Install any packages that aren't there yet then load
@@ -29,37 +26,236 @@ pacman::p_load(
   tidyverse, # data wrangling
   here, # clean file paths
   lavaan, # latent growth curve models
-  haven
+  haven, 
+  patchwork
 )
+```
 
-#| label: load-data
+```{r load-data}
 # here() builds a path from project root, so it works regardless of machine or subfolder
+countries <- c("ethiopia", "india", "peru", "vietnam")
 
 # Load rounds 1-7 constructed files 
-ethiopia <- read_sav(here("data", "ethiopia.sav"))
-india    <- read_sav(here("data", "india.sav"))
-peru     <- read_sav(here("data", "peru.sav"))
-vietnam  <- read_sav(here("data", "vietnam.sav"))
+data_list <- map(countries, ~ read_sav(here("data", paste0(.x, ".sav")))) |>
+  set_names(countries)
 
 # Load SDQ-E files (rounds 3-5, 1994-cohort only)
+rounds    <- 3:5
+combos <- tidyr::expand_grid(country = countries, round = rounds) # every country–round combination
+sdq_list <- map2(
+  combos$country, combos$round,
+  ~ read_sav(here("data", paste0(.x, "_r", .y, "_sdq.sav")))
+) |>
+  set_names(paste0(combos$country, "_r", combos$round, "_sdq"))
+
+# Note: Generally, the SDQ files for rounds 3-5 are named occh_older_child. The only exception is for Peru rounds 4 and 5, the files are named olderchild-SAQ. 
 ```
 
-Check data structure
+### Variable transformations
 
-```{r view-files}
-# ethiopia |> view()
-# india |> view()
-# peru |> view()
-# vietnam |> view()
-```
+Key variables from each file
 
-Analytical variables in each file
-
-- Constructed files (ethiopia, india, peru, vietnam): **child's religious affiliation** (*chldrel*), **life satisfaction** (*cladder*), **sex** (*chsex*), **cluster ID** (*clustid)*
+- Constructed files (ethiopia, india, peru, vietnam): child's ID (*childid*), cohort (*yc*), round, cluster ID (*clustid),* age in years (*ageyea*)*,* **sex** (*chsex*), child's ethnic group (*chethnic*), **child's religious affiliation** (*chldrel*), **life satisfaction** (*cladder*)
 
 - SDQ-E files (ethiopia_r3-5, india_r3-5, peru_r3-5, vietnam_r3-5): strengths and difficulties questionnaire emotional subscale - **psychological distress** (comprised of 5 items) collected at rounds 3, 4 and 5 for the 1994-cohort at ages 15, 19, and 22 respectively
 
-### Categorise minority and majority status
+#### Select variables
+
+```{r main-file-variables}
+
+# Variables from constructed file
+keep_vars <- c("childid", "yc", "round", "ageyea", "chldrel", "cladder", "chsex", "chethnic", "clustid")
+data <- map(data_list, function(df) {
+  df |> 
+    select(all_of(keep_vars)) |> 
+    mutate(childid = as.character(childid))
+})
+```
+
+```{r sdq-variables}
+## Country prefixes for childid
+prefixes <- c(ethiopia = "ET", india = "IN", peru = "PE", vietnam = "VN")
+
+## Fix childid: make sure there are 6 digits and add country prefix
+fix_childid <- function(id, prefix) {
+  id <- as.character(id)
+  ifelse(str_detect(id, "^[A-Za-z]"),                 # if already full format
+         id,                                          # leave it alone
+         paste0(prefix, str_pad(id, 6, "left", "0"))) # otherwise reconstruct
+}
+
+## SDQ items come in two naming schemes across countries/rounds
+scheme_headac <- function(r) c(
+  headache = paste0("HEADACR", r),
+  worry    = paste0("WRYLOTR", r),
+  unhappy  = paste0("UNHPPYR", r),
+  nervous  = paste0("NRVSITR", r),
+  fears    = paste0("MNYFERR", r)
+)
+scheme_feay <- function(r) c(
+  headache = paste0("FEAY13R", r),
+  worry    = paste0("FEAY05R", r),
+  unhappy  = paste0("FEAY20R", r),
+  nervous  = paste0("FEAY38R", r),
+  fears    = paste0("FEAY28R", r)
+)
+
+## Which scheme each country uses at R4/R5 (R3 is same across countries)
+country_scheme <- list(
+  india    = scheme_feay,
+  peru     = scheme_headac,
+  ethiopia = scheme_feay,
+  vietnam  = scheme_feay
+)
+
+## Clean SDQ files: select + rename items and ID, then fix childid
+sdq <- imap(sdq_list, function(df, nm) {
+  ctry <- str_extract(nm, "^[a-z]+")
+  rnum <- str_extract(nm, "[3-5]")
+  pfx  <- prefixes[[ctry]]
+  
+  df <- df |> rename_with(toupper)
+  
+  # R3 uses HEADAC everywhere; R4/R5 use the country's scheme
+  items <- if (rnum == "3") scheme_headac(rnum) else country_scheme[[ctry]](rnum)
+  items <- setNames(items, paste0(names(items), "_r", rnum))
+  
+  idc <- if (rnum == "3") "CHILDID" else "CHILDCODE"
+  
+  df |>
+    select(all_of(c(childid = idc, items))) |>
+    mutate(childid = fix_childid(childid, pfx))
+})
+```
+
+#### Rescale SDQ
+
+```{r inspect-sdq}
+#| include: false
+## Distinct response values in each country-round, pre-rescale
+imap(sdq, function(df, nm) {
+  rnum <- str_extract(nm, "[3-5]")
+  cols <- paste0(c("headache", "worry", "unhappy", "nervous", "fears"), "_r", rnum)
+  sort(unique(as.numeric(unlist(df[cols]))))
+})
+```
+
+SDQ-E needs to be **rescaled and standardised** as measurement was different across rounds and countries.
+
+- Round 3: 1 - not true for you, 2 - a little true for you, 3 - certainly true for you, 77 - NK, 88 - N/A, 99 - Missing
+
+- Rounds 4 and 5: 1 - strongly disagree, 2 - disagree, 3 - agree, 4 - strongly agree, 77 - NK, 79 - refused to answer
+
+SDQ sub-scale is normally **0 - not true, 1 - somewhat true, 2 - certainly true -\> 10 full score**.
+
+Therefore, scale of 1-3 (round 3) will be rescaled to 0-2. As for scale of 1-4 (rounds 4-5), 1,2 will be collapsed to 0 (not true), 3\>1, and 4-\>2.
+
+```{r rescale-sdq}
+## --- SDQ rescaling + imputation across all country-round files ---
+
+# Rescale function; unrecognised values (77/79/88/99) fall all become NA
+rescale_3pt <- function(x) case_when(x == 1 ~ 0, x == 2 ~ 1, x == 3 ~ 2, TRUE ~ NA_real_)
+rescale_4pt <- function(x) case_when(x %in% c(1, 2) ~ 0, x == 3 ~ 1, x == 4 ~ 2, TRUE ~ NA_real_)
+
+# Format at R4/R5 (R3 is 3pt for everyone) — all four confirmed against the data
+format_r45 <- c(india = "4pt", peru = "3pt", ethiopia = "4pt", vietnam = "4pt")
+
+sdq <- imap(sdq, function(df, nm) {
+  ctry <- str_extract(nm, "^[a-z]+")
+  rnum <- str_extract(nm, "[3-5]")
+  cols <- paste0(c("headache", "worry", "unhappy", "nervous", "fears"), "_r", rnum)
+  
+  fmt     <- if (rnum == "3") "3pt" else format_r45[[ctry]]
+  rescale <- if (fmt == "3pt") rescale_3pt else rescale_4pt
+  
+  df |>
+    mutate(across(all_of(cols), ~ rescale(as.numeric(.x)))) |>
+    mutate(
+      nonmiss = rowSums(!is.na(across(all_of(cols)))),
+      !!paste0("emo_r", rnum) := if_else(
+        nonmiss > 2, # need to have answered 3 or more out of 5 items to be included
+        round(rowMeans(across(all_of(cols)), na.rm = TRUE) * 5),
+        NA_real_
+      )
+    ) |>
+    select(-nonmiss)
+})
+```
+
+```{r check-sdq}
+## Check each round's total emotional score is within 0-10 with sensible NA counts
+imap(sdq, function(df, nm) {
+  rnum <- str_extract(nm, "[3-5]")
+  summary(df[[paste0("emo_r", rnum)]])
+})
+```
+
+#### Transform variables
+
+```{r check-variables}
+# Check distinct values of each key variable 
+map(data, function(df) {
+  map(df[c("cladder", "chsex", "chldrel", "chethnic", "ageyea")], ~sort(unique(as.numeric(.x))))
+})
+# No NA values 77/88/99 to transform
+
+# Transform into named categories
+map(data, ~ haven::as_factor(.x$chldrel) |> table(useNA = "always"))
+map(data, ~ haven::as_factor(.x$chsex) |> table(useNA = "always"))
+map(data, ~ haven::as_factor(.x$chethnic) |> table(useNA = "always"))
+```
+
+Create separate dataframes for each country
+
+```{r country-dataframes}
+
+# SDQ: one row per child 
+sdq_scores <- imap(sdq, function(df, nm) {
+  rnum <- str_extract(nm, "[3-5]")
+  df |> select(childid, !!paste0("emo_r", rnum))
+})
+
+# Merge constructed data and SDQ for each country 
+countries <- c("ethiopia", "india", "peru", "vietnam")
+
+merged_data <- map(countries, function(ctry) {
+  base      <- data[[ctry]]
+  sdq_files <- sdq_scores[str_starts(names(sdq_scores), paste0(ctry, "_"))]
+  reduce(sdq_files, left_join, by = "childid", .init = base)
+}) |>
+  set_names(countries)
+
+# Row counts shouldn't jump (a jump = duplicate childids somewhere)
+map_int(merged_data, nrow)
+
+# Create separate dataframes for each country
+list2env(merged_data, envir = .GlobalEnv) 
+```
+
+### Structuring data
+
+#### Create variable 'equivalent age' 
+
+Although we have age in years as the variable for real age, we need an equivalent age of each round i.e. in round 3 for example, the 2001-cohort is aged 8 and the 1994-cohort is aged 15.
+
+```{r equivalent-age}
+age_yc <- c("1"=1, "2"=5, "3"=8, "4"=12, "5"=15, "6"=19, "7"=22)
+age_oc <- c("1"=8, "2"=12, "3"=15, "4"=19, "5"=22, "6"=26, "7"=29)
+
+add_age <- function(df) {
+  df %>%
+    mutate(equivalent_age = if_else(yc == 1, age_yc[as.character(round)],
+                                    age_oc[as.character(round)])) %>%
+    filter(!is.na(equivalent_age)) %>%
+    group_by(childid, equivalent_age) %>%
+    slice_max(!is.na(cladder), n = 1, with_ties = FALSE) %>% # In round 6 there are multiple rows for phone calls but we only keep the row that has cladder data
+    ungroup()
+}
+
+stacked <- map(merged_data, add_age)
+```
+
+# Categorise minority and majority status
 
 We use religious demographics from 2000 accessesd via the World Religion Database for each of the four countries. We only include religions \>1% of the population share.
 
@@ -70,3 +266,150 @@ We use religious demographics from 2000 accessesd via the World Religion Databas
 - **Peru**: 96% Christian, 1.4% Ethnic religionist, 1.2% Agnostic
 
 - **Vietnam**: 48% Buddhist, 13% Agnostic, 12% Ethnic religionist, 10.8% New religionist, 8.3% Christian, 6.7% Atheist, 1.0% Chinese folk religionist
+
+```{r check-religions}
+map(stacked, ~ count(.x, chldrel = as_factor(chldrel)))
+```
+
+It appears that in Vietnam, although WRD had 48% Buddhist and around 20% non-religious, in the Young Lives sample 90% have no religion. I will put both Buddhist and none as 'majority religion' for now until we make a decision.
+
+```{r classify}
+
+# Specify majority religions
+majority_religion <- list(ethiopia = "Christian", india = "Hindu", peru = "Christian", vietnam = c("Buddhist", "None"))
+
+classify <- function(df, ctry) {
+  df |>
+    mutate(
+      rel_lower = str_to_lower(as.character(as_factor(chldrel))),
+      religion_status = case_when(
+        str_detect(rel_lower, "catholic|protestant|orthodox|christ|evangel") ~ "Christian",
+        str_detect(rel_lower, "hindu") ~ "Hindu",
+        str_detect(rel_lower, "buddh") ~ "Buddhist",
+        str_detect(rel_lower, "muslim|islam") ~ "Muslim",
+        str_detect(rel_lower, "sikh") ~ "Sikh",
+        str_detect(rel_lower, "cao dai|hao hao") ~ "New religionist",
+        str_detect(rel_lower, "ancestor") ~ "Ethnic religionist",
+        rel_lower == "none" ~ "None",
+        TRUE ~ "Other"
+      ),
+      minority = if_else(religion_status %in% majority_religion[[ctry]],
+                         "Majority", "Minority")
+    ) |>
+    select(-rel_lower)
+}
+
+stacked <- imap(stacked, classify)
+```
+
+*Later we will create another variable majority_religion_region such that instead of country-level demographics we will use regional demographics to determine majority and minority status*
+
+```{r check-classifications}
+map(stacked, ~ .x |>
+      distinct(childid, religion_status, minority) |>
+      count(religion_status, minority))
+
+map(stacked, ~ .x |>
+      distinct(childid, religion_status, minority) |>
+      count(minority) |>
+      mutate(pct = round(100 * n / sum(n), 1)))
+```
+
+# Descriptives 
+
+## Visualisations
+
+### Life satisfaction 
+
+Overall trajectory
+
+```{r overall-traj}
+# Mean cladder by age, overall and by group, per country
+plot_trajectory <- function(df, ctry) {
+  # split version
+  df |>
+    filter(!is.na(cladder), !is.na(equivalent_age)) |>
+    group_by(equivalent_age) |>
+    summarise(mean_cl = mean(cladder), n = n(), .groups = "drop") |>
+    ggplot(aes(equivalent_age, mean_cl)) +
+    geom_line() + geom_point() +
+    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
+    scale_y_continuous(limits = c(4, 7)) +
+    labs(title = ctry, x = "Age", y = "Mean life satisfaction") +
+    theme_minimal()
+}
+
+plots <- imap(stacked, plot_trajectory)
+wrap_plots(plots, ncol = 2)
+```
+
+By minority/majority status
+
+```{r traj-min-maj}
+
+
+# Mean cladder by age, overall and by group, per country
+plot_trajectory <- function(df, ctry) {
+  # split version
+  df |>
+    filter(!is.na(cladder), !is.na(equivalent_age)) |>
+    group_by(equivalent_age, minority) |>
+    summarise(mean_cl = mean(cladder),
+              se = sd(cladder)/sqrt(n()),
+              n = n(), .groups = "drop") |>
+    ggplot(aes(equivalent_age, mean_cl, colour = minority)) +
+    geom_line() + geom_point() +
+    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
+    scale_y_continuous(limits = c(4, 7)) +
+    labs(title = ctry, x = "Age", y = "Mean life satisfaction") +
+    geom_ribbon(aes(ymin = mean_cl - 1.96*se, ymax = mean_cl + 1.96*se, fill = minority), alpha = 0.2, colour = NA) +
+    theme_minimal()
+}
+
+plots <- imap(stacked, plot_trajectory)
+wrap_plots(plots, ncol = 2)
+```
+
+By sex
+
+```{r traj-sex}
+
+# Mean cladder by age, overall and by group, per country
+plot_trajectory <- function(df, ctry) {
+  # split version
+  df |>
+    filter(!is.na(cladder), !is.na(equivalent_age)) |>
+    mutate(chsex = as_factor(chsex)) |> 
+    group_by(equivalent_age, chsex) |>
+    summarise(mean_cl = mean(cladder), n = n(), .groups = "drop") |>
+    ggplot(aes(equivalent_age, mean_cl, colour = chsex)) +
+    geom_line() + geom_point() +
+    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
+    scale_y_continuous(limits = c(3, 7)) +
+    labs(title = ctry, x = "Age", y = "Mean life satisfaction") +
+    theme_minimal()
+}
+
+plots <- imap(stacked, plot_trajectory)
+wrap_plots(plots, ncol = 2)
+```
+
+By majority/minority status and sex
+
+```{r traj-sex-minority}
+bind_rows(stacked, .id = "country") |>
+  filter(!is.na(cladder), !is.na(equivalent_age)) |>
+  mutate(chsex = as_factor(chsex)) |>
+  group_by(country, equivalent_age, chsex, minority) |>
+  summarise(mean_cl = mean(cladder),
+            se = sd(cladder) / sqrt(n()),
+            .groups = "drop") |>
+  ggplot(aes(equivalent_age, mean_cl, colour = minority, fill = minority)) +
+  geom_ribbon(aes(ymin = mean_cl - 1.96 * se, ymax = mean_cl + 1.96 * se),
+              alpha = 0.2, colour = NA) +
+  geom_line() + geom_point() +
+  facet_grid(country ~ chsex) +
+  scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
+  scale_y_continuous(limits = c(4, 7)) +
+  theme_minimal()
+```
