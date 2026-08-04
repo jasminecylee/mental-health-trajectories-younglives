@@ -1,0 +1,72 @@
+---
+title: "preprocessing"
+format: 
+  html: 
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-fold: false
+    df-print: paged
+editor: visual
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+# Pre-processing
+
+This Quarto document pre-processes data from the Young Lives project, accessed via the UK Data Service.
+
+### Set-up
+
+```{r setup}
+#| label: setup
+#| include: false
+
+# Install any packages that aren't there yet then load
+pacman::p_load(
+  tidyverse, # data wrangling
+  here, # clean file paths
+  lavaan, # latent growth curve models
+  haven
+)
+
+#| label: load-data
+# here() builds a path from project root, so it works regardless of machine or subfolder
+
+# Load rounds 1-7 constructed files 
+ethiopia <- read_sav(here("data", "ethiopia.sav"))
+india    <- read_sav(here("data", "india.sav"))
+peru     <- read_sav(here("data", "peru.sav"))
+vietnam  <- read_sav(here("data", "vietnam.sav"))
+
+# Load SDQ-E files (rounds 3-5, 1994-cohort only)
+```
+
+Check data structure
+
+```{r view-files}
+# ethiopia |> view()
+# india |> view()
+# peru |> view()
+# vietnam |> view()
+```
+
+Analytical variables in each file
+
+- Constructed files (ethiopia, india, peru, vietnam): **child's religious affiliation** (*chldrel*), **life satisfaction** (*cladder*), **sex** (*chsex*), **cluster ID** (*clustid)*
+
+- SDQ-E files (ethiopia_r3-5, india_r3-5, peru_r3-5, vietnam_r3-5): strengths and difficulties questionnaire emotional subscale - **psychological distress** (comprised of 5 items) collected at rounds 3, 4 and 5 for the 1994-cohort at ages 15, 19, and 22 respectively
+
+### Categorise minority and majority status
+
+We use religious demographics from 2000 accessesd via the World Religion Database for each of the four countries. We only include religions \>1% of the population share.
+
+- **Ethiopia**: 58% Christian, 34% Muslim, 7.0% Ethnic religionists
+
+- **India**: 75% Hindus, 13% Muslims, 4.2% Christians, 3.3% Ethnic religionists, 1.8% Sikhs, 1.4% Agnostics
+
+- **Peru**: 96% Christian, 1.4% Ethnic religionist, 1.2% Agnostic
+
+- **Vietnam**: 48% Buddhist, 13% Agnostic, 12% Ethnic religionist, 10.8% New religionist, 8.3% Christian, 6.7% Atheist, 1.0% Chinese folk religionist
