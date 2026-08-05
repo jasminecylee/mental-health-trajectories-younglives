@@ -234,7 +234,7 @@ list2env(merged_data, envir = .GlobalEnv)
 
 ### Structuring data
 
-#### Create variable 'equivalent age' 
+#### Create variable 'equivalent age'
 
 Although we have age in years as the variable for real age, we need an equivalent age of each round i.e. in round 3 for example, the 2001-cohort is aged 8 and the 1994-cohort is aged 15.
 
@@ -255,9 +255,28 @@ add_age <- function(df) {
 stacked <- map(merged_data, add_age)
 ```
 
+```{r stack-sdq}
+# There are three variables for SDQ at the moment, emo_r3, emo_r4 and emo_r5 but the data is long so there should be only one variable and the data split across rounds.
+
+stacked <- map(stacked, \(df) {
+  df |> 
+    mutate(sdq = case_when(
+      round == 3 ~ emo_r3,
+      round == 4 ~ emo_r4,
+      round == 5 ~ emo_r5,
+      TRUE ~ NA_real_
+    )) |> 
+    select(-emo_r3, -emo_r4, -emo_r5)
+})
+```
+
 # Categorise minority and majority status
 
-We use religious demographics from 2000 accessesd via the World Religion Database for each of the four countries. We only include religions \>1% of the population share.
+::: callout-note
+**Update**: It appears it would be more appropriate to take into account country context when classifying majority/minority rather than solely rely on World Religion Database.
+:::
+
+We use religious demographics from 2000 accessed via the World Religion Database for each of the four countries. We only include religions \>1% of the population share.
 
 - **Ethiopia**: 58% Christian, 34% Muslim, 7.0% Ethnic religionists
 
@@ -276,27 +295,19 @@ It appears that in Vietnam, although WRD had 48% Buddhist and around 20% non-rel
 ```{r classify}
 
 # Specify majority religions
-majority_religion <- list(ethiopia = "Christian", india = "Hindu", peru = "Christian", vietnam = c("Buddhist", "None"))
+majority_religion <- list(ethiopia = "orthodox", india = "hindu", peru = "catholic", vietnam = c("buddhist", "none", "ancestor worship"))
 
 classify <- function(df, ctry) {
-  df |>
+  maj <- majority_religion[[tolower(ctry)]]
+  df |> 
     mutate(
-      rel_lower = str_to_lower(as.character(as_factor(chldrel))),
-      religion_status = case_when(
-        str_detect(rel_lower, "catholic|protestant|orthodox|christ|evangel") ~ "Christian",
-        str_detect(rel_lower, "hindu") ~ "Hindu",
-        str_detect(rel_lower, "buddh") ~ "Buddhist",
-        str_detect(rel_lower, "muslim|islam") ~ "Muslim",
-        str_detect(rel_lower, "sikh") ~ "Sikh",
-        str_detect(rel_lower, "cao dai|hao hao") ~ "New religionist",
-        str_detect(rel_lower, "ancestor") ~ "Ethnic religionist",
-        rel_lower == "none" ~ "None",
-        TRUE ~ "Other"
-      ),
-      minority = if_else(religion_status %in% majority_religion[[ctry]],
-                         "Majority", "Minority")
-    ) |>
-    select(-rel_lower)
+      chldrel = as.character(as_factor(chldrel)),
+     minority = case_when(
+       is.na(chldrel) ~ NA_character_,
+       tolower(chldrel) %in% maj ~ "Majority",
+       TRUE ~ "Minority"
+     )
+      )
 }
 
 stacked <- imap(stacked, classify)
@@ -306,20 +317,33 @@ stacked <- imap(stacked, classify)
 
 ```{r check-classifications}
 map(stacked, ~ .x |>
-      distinct(childid, religion_status, minority) |>
-      count(religion_status, minority))
+      distinct(childid, chldrel, minority) |>
+      count(chldrel, minority))
 
 map(stacked, ~ .x |>
-      distinct(childid, religion_status, minority) |>
+      distinct(childid, chldrel, minority) |>
       count(minority) |>
       mutate(pct = round(100 * n / sum(n), 1)))
+
+# Check how many NAs, then drop
+stacked <- imap(stacked, classify) |> map(~ filter(.x, !is.na(minority)))
 ```
 
-# Descriptives 
+Missingness for religion (*chldrel*)
+
+- Ethiopia: 2
+
+- India: 0
+
+- Peru: 1
+
+- Vietnam: 1
+
+# Descriptives
 
 ## Visualisations
 
-### Life satisfaction 
+### Life satisfaction - combined cohorts
 
 Overall trajectory
 
@@ -349,7 +373,7 @@ By minority/majority status
 
 
 # Mean cladder by age, overall and by group, per country
-plot_trajectory <- function(df, ctry) {
+plot_trajectory_minmaj <- function(df, ctry) {
   # split version
   df |>
     filter(!is.na(cladder), !is.na(equivalent_age)) |>
@@ -366,7 +390,7 @@ plot_trajectory <- function(df, ctry) {
     theme_minimal()
 }
 
-plots <- imap(stacked, plot_trajectory)
+plots <- imap(stacked, plot_trajectory_minmaj)
 wrap_plots(plots, ncol = 2)
 ```
 
@@ -375,7 +399,7 @@ By sex
 ```{r traj-sex}
 
 # Mean cladder by age, overall and by group, per country
-plot_trajectory <- function(df, ctry) {
+plot_trajectory_sex <- function(df, ctry) {
   # split version
   df |>
     filter(!is.na(cladder), !is.na(equivalent_age)) |>
@@ -390,7 +414,7 @@ plot_trajectory <- function(df, ctry) {
     theme_minimal()
 }
 
-plots <- imap(stacked, plot_trajectory)
+plots <- imap(stacked, plot_trajectory_sex)
 wrap_plots(plots, ncol = 2)
 ```
 
@@ -412,4 +436,78 @@ bind_rows(stacked, .id = "country") |>
   scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
   scale_y_continuous(limits = c(4, 7)) +
   theme_minimal()
+```
+
+### Psychological distress (SDQ-E) - 1994-cohort only
+
+Overall trajectory
+
+```{r overall-traj-sdq}
+# Mean SDQ-E by age, overall and by group, per country
+plot_trajectory_sdq <- function(df, ctry) {
+  # split version
+  df |>
+    filter(!is.na(sdq), !is.na(equivalent_age)) |>
+    group_by(equivalent_age) |>
+    summarise(mean_cl = mean(sdq), n = n(), .groups = "drop") |>
+    ggplot(aes(equivalent_age, mean_cl)) +
+    geom_line() + geom_point() +
+    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
+    scale_y_continuous(limits = c(0, 10)) +
+    labs(title = ctry, x = "Age", y = "Mean psychological distress") +
+    theme_minimal()
+}
+
+plots <- imap(stacked, plot_trajectory_sdq)
+wrap_plots(plots, ncol = 2)
+```
+
+By minority/majority status
+
+```{r traj-min-maj-sdq}
+
+# Mean SDQ by age, overall and by group, per country
+plot_trajectory_minmaj_sdq <- function(df, ctry) {
+  # split version
+  df |>
+    filter(!is.na(sdq), !is.na(equivalent_age)) |>
+    group_by(equivalent_age, minority) |>
+    summarise(mean_cl = mean(sdq),
+              se = sd(sdq)/sqrt(n()),
+              n = n(), .groups = "drop") |>
+    ggplot(aes(equivalent_age, mean_cl, colour = minority)) +
+    geom_line() + geom_point() +
+    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
+    scale_y_continuous(limits = c(0, 10)) +
+    labs(title = ctry, x = "Age", y = "Mean psychological distress") +
+    geom_ribbon(aes(ymin = mean_cl - 1.96*se, ymax = mean_cl + 1.96*se, fill = minority), alpha = 0.2, colour = NA) +
+    theme_minimal()
+}
+
+plots <- imap(stacked, plot_trajectory_minmaj_sdq)
+wrap_plots(plots, ncol = 2)
+```
+
+By sex
+
+```{r traj-sex-sdq}
+
+# Mean SDQ by age, overall and by group, per country
+plot_trajectory_sex_sdq <- function(df, ctry) {
+  # split version
+  df |>
+    filter(!is.na(sdq), !is.na(equivalent_age)) |>
+    mutate(chsex = as_factor(chsex)) |> 
+    group_by(equivalent_age, chsex) |>
+    summarise(mean_cl = mean(sdq), n = n(), .groups = "drop") |>
+    ggplot(aes(equivalent_age, mean_cl, colour = chsex)) +
+    geom_line() + geom_point() +
+    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
+    scale_y_continuous(limits = c(0, 10)) +
+    labs(title = ctry, x = "Age", y = "Mean psychological distress") +
+    theme_minimal()
+}
+
+plots <- imap(stacked, plot_trajectory_sex_sdq)
+wrap_plots(plots, ncol = 2)
 ```
