@@ -5,7 +5,6 @@ format:
     toc: true
     toc-depth: 3
     number-sections: true
-    code-fold: false
     df-print: paged
 editor: visual
 execute:
@@ -18,8 +17,10 @@ This Quarto document pre-processes data from the Young Lives project, accessed v
 
 # Set up
 
+*Load packages*
+
 ```{r setup}
-#| include: false
+#| code-fold: true
 
 # Install any packages that aren't there yet then load
 pacman::p_load(
@@ -27,11 +28,21 @@ pacman::p_load(
   here, # clean file paths
   lavaan, # latent growth curve models
   haven, 
-  patchwork
+  patchwork, 
+  purrr,
+  ggplot2
 )
+
+# Set colours
+group_cols <- c(Majority = "#4A90D9",   # blue
+                Minority = "#E05B5B")   # red
 ```
 
+*Load data*
+
 ```{r load-data}
+#| code-fold: true
+
 # here() builds a path from project root, so it works regardless of machine or subfolder
 countries <- c("ethiopia", "india", "peru", "vietnam")
 
@@ -61,7 +72,10 @@ Key variables from each file
 
 #### Select variables
 
+*Constructed file*
+
 ```{r main-file-variables}
+#| code-fold: true
 
 # Variables from constructed file
 keep_vars <- c("childid", "yc", "round", "ageyea", "chldrel", "cladder", "chsex", "chethnic", "clustid")
@@ -72,7 +86,11 @@ data <- map(data_list, function(df) {
 })
 ```
 
+*SDQ-E files*
+
 ```{r sdq-variables}
+#| code-fold: true
+
 ## Country prefixes for childid
 prefixes <- c(ethiopia = "ET", india = "IN", peru = "PE", vietnam = "VN")
 
@@ -130,8 +148,11 @@ sdq <- imap(sdq_list, function(df, nm) {
 
 #### Rescale SDQ
 
+*Check values*
+
 ```{r inspect-sdq}
-#| include: false
+#| code-fold: true
+
 ## Distinct response values in each country-round, pre-rescale
 imap(sdq, function(df, nm) {
   rnum <- str_extract(nm, "[3-5]")
@@ -150,8 +171,11 @@ SDQ sub-scale is normally **0 - not true, 1 - somewhat true, 2 - certainly true 
 
 Therefore, scale of 1-3 (round 3) will be rescaled to 0-2. As for scale of 1-4 (rounds 4-5), 1,2 will be collapsed to 0 (not true), 3\>1, and 4-\>2.
 
+The full score will be calculated as the mean of non-missing data \* 5.
+
+*Rescale SDQ*
+
 ```{r rescale-sdq}
-## --- SDQ rescaling + imputation across all country-round files ---
 
 # Rescale function; unrecognised values (77/79/88/99) fall all become NA
 rescale_3pt <- function(x) case_when(x == 1 ~ 0, x == 2 ~ 1, x == 3 ~ 2, TRUE ~ NA_real_)
@@ -182,6 +206,8 @@ sdq <- imap(sdq, function(df, nm) {
 })
 ```
 
+*Check rescaled values*
+
 ```{r check-sdq}
 ## Check each round's total emotional score is within 0-10 with sensible NA counts
 imap(sdq, function(df, nm) {
@@ -192,12 +218,21 @@ imap(sdq, function(df, nm) {
 
 #### Transform variables
 
+*Check values of variables - life satisfaction, sex, religion, ethnicity/caste, age*
+
 ```{r check-variables}
+#| include: false
+
 # Check distinct values of each key variable 
 map(data, function(df) {
   map(df[c("cladder", "chsex", "chldrel", "chethnic", "ageyea")], ~sort(unique(as.numeric(.x))))
 })
 # No NA values 77/88/99 to transform
+
+```
+
+```{r variables-named}
+#| code-fold: true 
 
 # Transform into named categories
 map(data, ~ haven::as_factor(.x$chldrel) |> table(useNA = "always"))
@@ -205,9 +240,10 @@ map(data, ~ haven::as_factor(.x$chsex) |> table(useNA = "always"))
 map(data, ~ haven::as_factor(.x$chethnic) |> table(useNA = "always"))
 ```
 
-Create separate dataframes for each country
+*Create separate dataframes for each country*
 
 ```{r country-dataframes}
+#| code-fold: true
 
 # SDQ: one row per child 
 sdq_scores <- imap(sdq, function(df, nm) {
@@ -230,6 +266,11 @@ map_int(merged_data, nrow)
 
 # Create separate dataframes for each country
 list2env(merged_data, envir = .GlobalEnv) 
+
+# For each child, take round 1's clustid for clustering
+r1_clust <- map(merged_data, ~ .x |> filter(round ==1) |> 
+                  mutate(clustid = if_else(clustid %in% c(0,80,88,90,99), NA_real_, as.numeric(clustid))) |> 
+                  select(childid, clustid_base = clustid))
 ```
 
 ### Structuring data
@@ -239,6 +280,8 @@ list2env(merged_data, envir = .GlobalEnv)
 Although we have age in years as the variable for real age, we need an equivalent age of each round i.e. in round 3 for example, the 2001-cohort is aged 8 and the 1994-cohort is aged 15.
 
 ```{r equivalent-age}
+#| code-fold: true
+
 age_yc <- c("1"=1, "2"=5, "3"=8, "4"=12, "5"=15, "6"=19, "7"=22)
 age_oc <- c("1"=8, "2"=12, "3"=15, "4"=19, "5"=22, "6"=26, "7"=29)
 
@@ -256,6 +299,8 @@ stacked <- map(merged_data, add_age)
 ```
 
 ```{r stack-sdq}
+#| code-fold: true
+
 # There are three variables for SDQ at the moment, emo_r3, emo_r4 and emo_r5 but the data is long so there should be only one variable and the data split across rounds.
 
 stacked <- map(stacked, \(df) {
@@ -270,27 +315,44 @@ stacked <- map(stacked, \(df) {
 })
 ```
 
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
 # Categorise minority and majority status
 
 ::: callout-note
-**Update**: It appears it would be more appropriate to take into account country context when classifying majority/minority rather than solely rely on World Religion Database.
+**Update**: We will take into account country context when classifying majority/minority rather than solely rely on World Religion Database.
 :::
 
-We use religious demographics from 2000 accessed via the World Religion Database for each of the four countries. We only include religions \>1% of the population share.
+World Religion Database religious demographics from 2000:
 
-- **Ethiopia**: 58% Christian, 34% Muslim, 7.0% Ethnic religionists
+- Ethiopia: 58% Christian, 34% Muslim, 7.0% Ethnic religionists
 
-- **India**: 75% Hindus, 13% Muslims, 4.2% Christians, 3.3% Ethnic religionists, 1.8% Sikhs, 1.4% Agnostics
+- India: 75% Hindus, 13% Muslims, 4.2% Christians, 3.3% Ethnic religionists, 1.8% Sikhs, 1.4% Agnostics
 
-- **Peru**: 96% Christian, 1.4% Ethnic religionist, 1.2% Agnostic
+- Peru: 96% Christian, 1.4% Ethnic religionist, 1.2% Agnostic
 
-- **Vietnam**: 48% Buddhist, 13% Agnostic, 12% Ethnic religionist, 10.8% New religionist, 8.3% Christian, 6.7% Atheist, 1.0% Chinese folk religionist
+- Vietnam: 48% Buddhist, 13% Agnostic, 12% Ethnic religionist, 10.8% New religionist, 8.3% Christian, 6.7% Atheist, 1.0% Chinese folk religionist
+
+*Check sample n by religion*
 
 ```{r check-religions}
-map(stacked, ~ count(.x, chldrel = as_factor(chldrel)))
+#| code-fold: true
+
+map(stacked, ~ .x |>
+      distinct(childid, chldrel) |>
+      count(chldrel = as_factor(chldrel)))
 ```
 
-It appears that in Vietnam, although WRD had 48% Buddhist and around 20% non-religious, in the Young Lives sample 90% have no religion. I will put both Buddhist and none as 'majority religion' for now until we make a decision.
+For now, we will define the majority religions for each country as the following
+
+- Ethiopia: **Orthodox**
+- India: **Hinduism**
+- Peru**: Catholicism**
+- Vietnam: **Buddhism, none, and ancestor worship** (to be discussed more, but all of these could be considered dominant traditions in Vietnam)
+
+*Classify majority/minority*
 
 ```{r classify}
 
@@ -313,9 +375,13 @@ classify <- function(df, ctry) {
 stacked <- imap(stacked, classify)
 ```
 
-*Later we will create another variable majority_religion_region such that instead of country-level demographics we will use regional demographics to determine majority and minority status*
+As sensitivity check in later analyses, if there are variations across Young Lives regions, instead of country-level demographics we will use regional demographics to determine majority and minority status.
+
+*Check classifications*
 
 ```{r check-classifications}
+#| code-fold: true
+
 map(stacked, ~ .x |>
       distinct(childid, chldrel, minority) |>
       count(chldrel, minority))
@@ -339,15 +405,21 @@ Missingness for religion (*chldrel*)
 
 - Vietnam: 1
 
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
 # Descriptives
 
 ## Visualisations
 
 ### Life satisfaction - combined cohorts
 
-Overall trajectory
+*Overall trajectory*
 
 ```{r overall-traj}
+#| code-fold: true
+
 # Mean cladder by age, overall and by group, per country
 plot_trajectory <- function(df, ctry) {
   # split version
@@ -367,10 +439,10 @@ plots <- imap(stacked, plot_trajectory)
 wrap_plots(plots, ncol = 2)
 ```
 
-By minority/majority status
+*By minority/majority status*
 
 ```{r traj-min-maj}
-
+#| code-fold: true
 
 # Mean cladder by age, overall and by group, per country
 plot_trajectory_minmaj <- function(df, ctry) {
@@ -387,6 +459,8 @@ plot_trajectory_minmaj <- function(df, ctry) {
     scale_y_continuous(limits = c(4, 7)) +
     labs(title = ctry, x = "Age", y = "Mean life satisfaction") +
     geom_ribbon(aes(ymin = mean_cl - 1.96*se, ymax = mean_cl + 1.96*se, fill = minority), alpha = 0.2, colour = NA) +
+    scale_colour_manual(values = group_cols) +
+    scale_fill_manual(values = group_cols) +
     theme_minimal()
 }
 
@@ -394,9 +468,10 @@ plots <- imap(stacked, plot_trajectory_minmaj)
 wrap_plots(plots, ncol = 2)
 ```
 
-By sex
+*By sex*
 
 ```{r traj-sex}
+#| code-fold: true
 
 # Mean cladder by age, overall and by group, per country
 plot_trajectory_sex <- function(df, ctry) {
@@ -418,9 +493,11 @@ plots <- imap(stacked, plot_trajectory_sex)
 wrap_plots(plots, ncol = 2)
 ```
 
-By majority/minority status and sex
+*By majority/minority status and sex*
 
 ```{r traj-sex-minority}
+#| code-fold: true
+
 bind_rows(stacked, .id = "country") |>
   filter(!is.na(cladder), !is.na(equivalent_age)) |>
   mutate(chsex = as_factor(chsex)) |>
@@ -432,17 +509,23 @@ bind_rows(stacked, .id = "country") |>
   geom_ribbon(aes(ymin = mean_cl - 1.96 * se, ymax = mean_cl + 1.96 * se),
               alpha = 0.2, colour = NA) +
   geom_line() + geom_point() +
+  scale_colour_manual(values = group_cols) +
+  scale_fill_manual(values = group_cols) +
   facet_grid(country ~ chsex) +
   scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
   scale_y_continuous(limits = c(4, 7)) +
   theme_minimal()
 ```
 
+------------------------------------------------------------------------
+
 ### Psychological distress (SDQ-E) - 1994-cohort only
 
-Overall trajectory
+*Overall trajectory*
 
 ```{r overall-traj-sdq}
+#| code-fold: true
+
 # Mean SDQ-E by age, overall and by group, per country
 plot_trajectory_sdq <- function(df, ctry) {
   # split version
@@ -462,9 +545,10 @@ plots <- imap(stacked, plot_trajectory_sdq)
 wrap_plots(plots, ncol = 2)
 ```
 
-By minority/majority status
+*By minority/majority status*
 
 ```{r traj-min-maj-sdq}
+#| code-fold: true
 
 # Mean SDQ by age, overall and by group, per country
 plot_trajectory_minmaj_sdq <- function(df, ctry) {
@@ -480,6 +564,8 @@ plot_trajectory_minmaj_sdq <- function(df, ctry) {
     scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
     scale_y_continuous(limits = c(0, 10)) +
     labs(title = ctry, x = "Age", y = "Mean psychological distress") +
+    scale_colour_manual(values = group_cols) +
+    scale_fill_manual(values = group_cols) +
     geom_ribbon(aes(ymin = mean_cl - 1.96*se, ymax = mean_cl + 1.96*se, fill = minority), alpha = 0.2, colour = NA) +
     theme_minimal()
 }
@@ -488,9 +574,10 @@ plots <- imap(stacked, plot_trajectory_minmaj_sdq)
 wrap_plots(plots, ncol = 2)
 ```
 
-By sex
+*By sex*
 
 ```{r traj-sex-sdq}
+#| code-fold: true
 
 # Mean SDQ by age, overall and by group, per country
 plot_trajectory_sex_sdq <- function(df, ctry) {
@@ -510,4 +597,357 @@ plot_trajectory_sex_sdq <- function(df, ctry) {
 
 plots <- imap(stacked, plot_trajectory_sex_sdq)
 wrap_plots(plots, ncol = 2)
+```
+
+*By majority/minority status and sex*
+
+```{r traj-sex-minority-sdq}
+#| code-fold: true
+
+bind_rows(stacked, .id = "country") |>
+  filter(!is.na(sdq), !is.na(equivalent_age)) |>
+  mutate(chsex = as_factor(chsex)) |>
+  group_by(country, equivalent_age, chsex, minority) |>
+  summarise(mean_cl = mean(sdq),
+            se = sd(sdq) / sqrt(n()),
+            .groups = "drop") |>
+  ggplot(aes(equivalent_age, mean_cl, colour = minority, fill = minority)) +
+  geom_ribbon(aes(ymin = mean_cl - 1.96 * se, ymax = mean_cl + 1.96 * se),
+              alpha = 0.2, colour = NA) +
+  geom_line() + geom_point() +
+  facet_grid(country ~ chsex) +
+  scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
+  scale_y_continuous(limits = c(0, 10)) +
+  scale_colour_manual(values = group_cols) +
+  scale_fill_manual(values = group_cols) +
+  theme_minimal()
+```
+
+### Check cohort equivalence
+
+*Summary and plot by age and cohort*
+
+```{r cohort-equivalence}
+#| code-fold: true
+
+# Mean cladder by age and cohort, at overlap ages, per country
+cohort_check <- map(stacked, ~ .x |>
+  filter(!is.na(cladder), equivalent_age %in% c(8, 12, 15, 19, 22)) |>
+  mutate(cohort = if_else(yc == 1, "Younger", "Older")) |>
+  group_by(equivalent_age, cohort) |>
+  summarise(mean_cl = mean(cladder), se = sd(cladder)/sqrt(n()), n = n(),
+            .groups = "drop"))
+
+cohort_check$ethiopia
+
+# Plot divergence - the cohorts are very different! 
+bind_rows(stacked, .id = "country") |>
+  filter(!is.na(cladder), equivalent_age %in% c(8, 12, 15, 19, 22)) |>
+  mutate(cohort = if_else(yc == 1, "Younger", "Older")) |>
+  group_by(country, equivalent_age, cohort) |>
+  summarise(mean_cl = mean(cladder), se = sd(cladder)/sqrt(n()), .groups = "drop") |>
+  ggplot(aes(equivalent_age, mean_cl, colour = cohort, fill = cohort)) +
+  geom_ribbon(aes(ymin = mean_cl - 1.96*se, ymax = mean_cl + 1.96*se),
+              alpha = 0.2, colour = NA) +
+  geom_line() + geom_point() +
+  facet_wrap(~ country) +
+  scale_x_continuous(breaks = c(8, 12, 15, 19, 22)) +
+  labs(y = "Mean life satisfaction", x = "Age") +
+  theme_minimal()
+```
+
+------------------------------------------------------------------------
+
+## Descriptive statistics
+
+*Summary table: per country x age x religious majority/minority*
+
+```{r table-descriptives}
+#| code-fold: true
+
+# All countries together
+all_df <- bind_rows(stacked, .id = "country")
+
+# Pivot longer, mean/SD/n per country x age x minority group
+desc <- all_df |> 
+  pivot_longer(c(cladder, sdq), names_to = "outcome", values_to = "value") |> 
+  filter(!is.na(value), !is.na(minority)) |> 
+  group_by(country, outcome, equivalent_age, minority) |> 
+  summarise(mean = mean(value), sd = sd(value), n = n(), .groups = "drop")
+
+# Clear wide table - maj/min side by side
+desc_table <- desc |> 
+  mutate(cell = sprintf("%.2f (%.2f) [n=%d]", mean, sd, n)) |> 
+  select(country, outcome, equivalent_age, minority, cell) |> 
+  pivot_wider(names_from = minority, values_from = cell) |> 
+  arrange(country, outcome, equivalent_age)
+
+desc_table
+```
+
+*Group comparisons at each timepoint - Welch's t-test*
+
+```{r comparisons}
+#| code-fold: true
+
+comparisons <- all_df |> 
+  pivot_longer(c(cladder, sdq), names_to = "outcome", values_to = "value") |> 
+  filter(!is.na(value), !is.na(minority)) |> 
+  mutate(minority = factor(minority, levels = c("Minority", "Majority"))) |> 
+  group_by(country, outcome, equivalent_age) |> 
+  filter(n_distinct(minority) == 2,
+         min(table(minority)) >= 2) |> 
+  summarise(
+    n_min = sum(minority == "Minority"),
+    n_maj = sum(minority == "Majority"),
+    tt = list(t.test(value ~ minority)),
+    .groups = "drop"
+  ) |> 
+  mutate(
+    diff_min_maj = map_dbl(tt, ~ .x$estimate[1] - .x$estimate[2]),
+    ci_low = map_dbl(tt, ~ .x$conf.int[1]),
+    ci_high = map_dbl(tt, ~ .x$conf.int[2]),
+    p_value = map_dbl(tt, "p.value")
+  ) |> 
+  select(-tt)
+comparisons
+```
+
+Welch's t test is preferred since the minority and majority groups do not have equal variances nor sample sizes. We can test whether the group means between minorities and majorities are statistically significant.
+
+Note that these are purely descriptive, we're doing many independent t-tests with no correction so this is more for establishing overall patterns.
+
+*diff_min_maj* is the minority - majority, i.e. if *diff_min_maj* is positive for *cladder*, that means that minorities have higher life satisfaction; whereas if it's positive for *sdq*, that means minorities have lower psychological distress (since the two scales are coded differently).
+
+Summary
+
+- Ethiopia: cladder at age 15, 22, 26, 29: minority better life satisfaction than majority
+
+- India: cladder at age 22: minority better life satisfaction than majority
+
+------------------------------------------------------------------------
+
+## Variability
+
+```{r histograms}
+#| code-fold: true
+
+plot_hist <- function(df, ctry, outcome_var) {
+  df |> 
+    filter(!is.na(.data[[outcome_var]]), !is.na(minority)) |> 
+    ggplot(aes(x = .data[[outcome_var]], fill = minority)) +
+    geom_histogram(aes(y = after_stat(density)),
+                   binwidth = 1, alpha = 0.5, position = "identity") +
+    facet_wrap(~ equivalent_age, ncol = 4) +
+    labs(title = paste0(ctry, " - ", outcome_var), x = outcome_var, y = "Count") +
+    theme_minimal() +
+    scale_fill_manual(values = group_cols) +
+    theme(legend.position = "none")
+}
+
+# Life satisfaction (combined cohort: 7 ages x 2 groups)
+iwalk(stacked, ~ print(plot_hist(.x, .y, "cladder")))
+
+# Psychological distress (1994-cohort: 3 ages x 2 groups)
+iwalk(stacked, ~ print(plot_hist(.x, .y, "sdq")))
+```
+
+------------------------------------------------------------------------
+
+------------------------------------------------------------------------
+
+# Latent Growth Curve Analyses (LGCA)
+
+*Structure data*
+
+```{r pivot-wide}
+#| code-fold: true
+
+to_wide <- function(df) {
+  df |>
+    mutate(chsex = as.numeric(as_factor(chsex)) - 1,  # 0/1
+           minority = if_else(minority == "Minority", 1, 0)) |>
+    select(childid, chsex, minority, clustid, yc, equivalent_age, cladder, sdq) |>
+    pivot_wider(names_from = equivalent_age,
+                values_from = c(cladder, sdq),
+                names_prefix = "age")
+}
+wide <- map(stacked, to_wide)
+wide <- map(wide, ~ .x |> group_by(childid) |>
+              fill(clustid, .direction = "downup") |> ungroup())
+
+names(wide$ethiopia)  # check column names
+```
+
+*Filter children* (only those with 3 complete cladder out of 5 for 2001-cohort, 7 for 1994-cohort)
+
+```{r filter-sample}
+#| code-fold: true
+
+wide <- map(wide, ~ .x |> 
+              mutate(n_cl = rowSums(!is.na(across(starts_with("cladder_age"))))) |> 
+              filter(n_cl >= 3) |> 
+              select(-n_cl))
+```
+
+## Life satisfaction models
+
+Given the two cohorts are not equivalent - with diverging trajectories, we will fit the models separately, and religious minority status and sex predicting the growth factors. 2001-cohort will have age 8-22, and 1994-cohort 12-29.
+
+We have two cohorts across four countries, so for simplicity we will build a function so it can be easily replicated.
+
+*LGCA helpers*
+
+```{r lgca-helpers}
+#| code-fold: true
+
+# Build lavaan growth syntax from a vector of ages, centred at the first age.
+# type: "intercept", "linear", or "conditional"
+make_spec <- function(ages, type = "linear") {
+  t <- ages - ages[1]                              # time scores, centred at first age
+  cols <- paste0("cladder_age", ages)
+  i <- paste0("i =~ ", paste0("1*", cols, collapse = " + "))
+  if (type == "intercept") return(i)
+  s <- paste0("s =~ ", paste0(t, "*", cols, collapse = " + "))
+  spec <- paste(i, s, sep = "\n")
+  if (type == "conditional")
+    spec <- paste(spec, "i ~ minority + chsex", "s ~ minority + chsex", sep = "\n")
+  spec
+}
+
+# Ages available per cohort per country
+ages_yc <- list(ethiopia = c(8,12,15,19,22), india = c(8,12,15,19,22),
+                peru = c(8,12,15,19,22), vietnam = c(8,12,15,19)) # vietnam up to age 19 only
+ages_oc <- list(ethiopia = c(12,15,19,22,26,29), india = c(12,15,19,22,26,29),
+                peru = c(12,15,19,22,26,29), vietnam = c(12,15,19,22,26)) # vietnam up to age 26 only
+
+# Fit one model type for one cohort, across all countries
+fit_all <- function(ages_list, type, cohort_val) {
+  imap(wide, function(df, ctry) {
+    spec <- make_spec(ages_list[[ctry]], type)
+    d <- df |> filter(yc == cohort_val, !is.na(minority), !is.na(chsex)) |>
+      mutate(minority = as.numeric(minority), chsex = as.numeric(chsex))
+    tryCatch(growth(spec, data = d, missing = "fiml"), error = function(e) NULL)
+  })
+}
+
+get_fit <- function(fits) {
+  extract <- function(f) {
+    if (is.null(f)) return(NULL)
+    as_tibble(as.list(fitMeasures(f, c("cfi","tli","rmsea"))))
+  }
+  map_dfr(fits, extract, .id = "country")
+}
+
+get_min_effect <- function(fits) {
+  extract <- function(f) {
+    if (is.null(f)) return(NULL)
+    parameterEstimates(f) |>
+      filter(rhs == "minority", lhs %in% c("i","s")) |>
+      select(lhs, est, se, pvalue)
+  }
+  map_dfr(fits, extract, .id = "country")
+}
+```
+
+### 2001-cohort age 8-22
+
+*Intercept only*
+
+```{r yc-intercept}
+yc_int <- fit_all(ages_yc, "intercept", 1)
+get_fit(yc_int)
+```
+
+*Linear (intercept and slope), FIML with clustering by clustid*
+
+```{r yc-linear}
+yc_lin <- fit_all(ages_yc, "linear", 1)
+get_fit(yc_lin)
+```
+
+*Conditional model (minority and sex)*
+
+```{r yc-conditional}
+yc_cond <- fit_all(ages_yc, "conditional", 1)
+get_min_effect(yc_cond)
+```
+
+------------------------------------------------------------------------
+
+### 1994-cohort age 12-29
+
+*Intercept-only*
+
+```{r oc-intercept}
+oc_int <- fit_all(ages_oc, "intercept", 0)
+get_fit(oc_int)
+```
+
+*Linear (intercept + slope)*
+
+```{r oc-linear}
+oc_lin <- fit_all(ages_oc, "linear", 0)
+get_fit(oc_lin)
+```
+
+*Conditional (minority + sex)*
+
+```{r oc-conditional}
+oc_cond <- fit_all(ages_oc, "conditional", 0)
+get_min_effect(oc_cond)
+```
+
+------------------------------------------------------------------------
+
+### Trajectory visualisations
+
+Visualise model-implied trajectories of minority vs majority groups per country
+
+```{r visualise-traj}
+#| code-fold: true 
+
+# Build implied minority & majority trajectories from a conditional fit
+implied_traj <- function(fit, ages) {
+  if (is.null(fit)) return(NULL)
+  cf <- coef(fit)
+  t <- ages - ages[1]
+  # majority = reference (minority=0, sex held at 0); minority adds its coef
+  maj_i <- cf["i~1"]; maj_s <- cf["s~1"]
+  min_i <- maj_i + cf["i~minority"]; min_s <- maj_s + cf["s~minority"]
+  tibble(
+    age = rep(ages, 2),
+    group = rep(c("Majority","Minority"), each = length(ages)),
+    fit = c(maj_i + maj_s*t, min_i + min_s*t)
+  )
+}
+```
+
+```{r yc-traj}
+# 2001-cohort
+traj_yc <- imap_dfr(yc_cond, ~ {
+  d <- implied_traj(.x, ages_yc[[.y]])
+  if (is.null(d)) NULL else mutate(d, country = .y)
+})
+
+ggplot(traj_yc, aes(age, fit, colour = group)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ country) +
+  labs(title = "2001-Cohort", y = "Life satisfaction", x = "Age", colour = NULL) +
+  scale_colour_manual(values = c("Majority" = "#4477AA", "Minority" = "#CC6677")) +
+  theme_minimal()
+```
+
+```{r oc-traj}
+traj_oc <- imap_dfr(oc_cond, ~ {
+  d <- implied_traj(.x, ages_oc[[.y]])
+  if (is.null(d)) NULL else mutate(d, country = .y)
+})
+
+ggplot(traj_oc, aes(age, fit, colour = group)) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ country) +
+  labs(title = "1994-Cohort", y = "Life satisfaction", x = "Age", colour = NULL) +
+  scale_colour_manual(values = c("Majority" = "#4477AA", "Minority" = "#CC6677")) +
+  theme_minimal()
 ```
