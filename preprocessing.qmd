@@ -6,6 +6,7 @@ format:
     toc-depth: 3
     number-sections: true
     df-print: paged
+    embed-resources: true
 editor: visual
 execute:
   echo: true
@@ -36,6 +37,8 @@ pacman::p_load(
 # Set colours
 group_cols <- c(Majority = "#4A90D9",   # blue
                 Minority = "#E05B5B")   # red
+
+options(scipen = 999)
 ```
 
 *Load data*
@@ -298,23 +301,6 @@ add_age <- function(df) {
 stacked <- map(merged_data, add_age)
 ```
 
-```{r stack-sdq}
-#| code-fold: true
-
-# There are three variables for SDQ at the moment, emo_r3, emo_r4 and emo_r5 but the data is long so there should be only one variable and the data split across rounds.
-
-stacked <- map(stacked, \(df) {
-  df |> 
-    mutate(sdq = case_when(
-      round == 3 ~ emo_r3,
-      round == 4 ~ emo_r4,
-      round == 5 ~ emo_r5,
-      TRUE ~ NA_real_
-    )) |> 
-    select(-emo_r3, -emo_r4, -emo_r5)
-})
-```
-
 ------------------------------------------------------------------------
 
 ------------------------------------------------------------------------
@@ -439,7 +425,38 @@ plots <- imap(stacked, plot_trajectory)
 wrap_plots(plots, ncol = 2)
 ```
 
-*By minority/majority status*
+*By cohort*
+
+```{r traj-cohort}
+#| code-fold: true
+
+# Mean cladder by age and cohort, at overlap ages, per country
+cohort_check <- map(stacked, ~ .x |>
+                      filter(!is.na(cladder), equivalent_age %in% c(8, 12, 15, 19, 22)) |>
+                      mutate(cohort = if_else(yc == 1, "Younger", "Older")) |>
+                      group_by(equivalent_age, cohort) |>
+                      summarise(mean_cl = mean(cladder), se = sd(cladder)/sqrt(n()), n = n(),
+                                .groups = "drop"))
+
+cohort_check$ethiopia
+
+# Plot 
+bind_rows(stacked, .id = "country") |>
+  filter(!is.na(cladder), equivalent_age %in% c(8, 12, 15, 19, 22)) |>
+  mutate(cohort = if_else(yc == 1, "Younger", "Older")) |>
+  group_by(country, equivalent_age, cohort) |>
+  summarise(mean_cl = mean(cladder), se = sd(cladder)/sqrt(n()), .groups = "drop") |>
+  ggplot(aes(equivalent_age, mean_cl, colour = cohort, fill = cohort)) +
+  geom_ribbon(aes(ymin = mean_cl - 1.96*se, ymax = mean_cl + 1.96*se),
+              alpha = 0.2, colour = NA) +
+  geom_line() + geom_point() +
+  facet_wrap(~ country) +
+  scale_x_continuous(breaks = c(8, 12, 15, 19, 22)) +
+  labs(y = "Mean life satisfaction", x = "Age") +
+  theme_minimal()
+```
+
+***By minority/majority status***
 
 ```{r traj-min-maj}
 #| code-fold: true
@@ -545,7 +562,7 @@ plots <- imap(stacked, plot_trajectory_sdq)
 wrap_plots(plots, ncol = 2)
 ```
 
-*By minority/majority status*
+***By minority/majority status***
 
 ```{r traj-min-maj-sdq}
 #| code-fold: true
@@ -620,39 +637,6 @@ bind_rows(stacked, .id = "country") |>
   scale_y_continuous(limits = c(0, 10)) +
   scale_colour_manual(values = group_cols) +
   scale_fill_manual(values = group_cols) +
-  theme_minimal()
-```
-
-### Check cohort equivalence
-
-*Summary and plot by age and cohort*
-
-```{r cohort-equivalence}
-#| code-fold: true
-
-# Mean cladder by age and cohort, at overlap ages, per country
-cohort_check <- map(stacked, ~ .x |>
-  filter(!is.na(cladder), equivalent_age %in% c(8, 12, 15, 19, 22)) |>
-  mutate(cohort = if_else(yc == 1, "Younger", "Older")) |>
-  group_by(equivalent_age, cohort) |>
-  summarise(mean_cl = mean(cladder), se = sd(cladder)/sqrt(n()), n = n(),
-            .groups = "drop"))
-
-cohort_check$ethiopia
-
-# Plot divergence - the cohorts are very different! 
-bind_rows(stacked, .id = "country") |>
-  filter(!is.na(cladder), equivalent_age %in% c(8, 12, 15, 19, 22)) |>
-  mutate(cohort = if_else(yc == 1, "Younger", "Older")) |>
-  group_by(country, equivalent_age, cohort) |>
-  summarise(mean_cl = mean(cladder), se = sd(cladder)/sqrt(n()), .groups = "drop") |>
-  ggplot(aes(equivalent_age, mean_cl, colour = cohort, fill = cohort)) +
-  geom_ribbon(aes(ymin = mean_cl - 1.96*se, ymax = mean_cl + 1.96*se),
-              alpha = 0.2, colour = NA) +
-  geom_line() + geom_point() +
-  facet_wrap(~ country) +
-  scale_x_continuous(breaks = c(8, 12, 15, 19, 22)) +
-  labs(y = "Mean life satisfaction", x = "Age") +
   theme_minimal()
 ```
 
@@ -804,14 +788,23 @@ We have two cohorts across four countries, so for simplicity we will build a fun
 # Build lavaan growth syntax from a vector of ages, centred at the first age.
 # type: "intercept", "linear", or "conditional"
 make_spec <- function(ages, type = "linear") {
-  t <- ages - ages[1]                              # time scores, centred at first age
+  t <- ages - ages[1]
   cols <- paste0("cladder_age", ages)
   i <- paste0("i =~ ", paste0("1*", cols, collapse = " + "))
   if (type == "intercept") return(i)
   s <- paste0("s =~ ", paste0(t, "*", cols, collapse = " + "))
   spec <- paste(i, s, sep = "\n")
-  if (type == "conditional")
+  if (type %in% c("quadratic","cubic")) {
+    q <- paste0("q =~ ", paste0(t^2, "*", cols, collapse = " + "))
+    spec <- paste(spec, q, sep = "\n")
+  }
+  if (type == "cubic") {
+    cub <- paste0("cub =~ ", paste0(t^3, "*", cols, collapse = " + "))
+    spec <- paste(spec, cub, sep = "\n")
+  }
+  if (type == "conditional") {
     spec <- paste(spec, "i ~ minority + chsex", "s ~ minority + chsex", sep = "\n")
+  }
   spec
 }
 
@@ -834,17 +827,19 @@ fit_all <- function(ages_list, type, cohort_val) {
 get_fit <- function(fits) {
   extract <- function(f) {
     if (is.null(f)) return(NULL)
+    if (!lavInspect(f, "converged")) return(NULL)   # skip non-converged
     as_tibble(as.list(fitMeasures(f, c("cfi","tli","rmsea"))))
   }
   map_dfr(fits, extract, .id = "country")
 }
 
-get_min_effect <- function(fits) {
+get_effects <- function(fits) {
   extract <- function(f) {
     if (is.null(f)) return(NULL)
+    if (!lavInspect(f, "converged")) return(NULL)
     parameterEstimates(f) |>
-      filter(rhs == "minority", lhs %in% c("i","s")) |>
-      select(lhs, est, se, pvalue)
+      filter(rhs %in% c("minority","chsex"), lhs %in% c("i","s")) |>
+      select(lhs, rhs, est, se, pvalue)
   }
   map_dfr(fits, extract, .id = "country")
 }
@@ -870,7 +865,16 @@ get_fit(yc_lin)
 
 ```{r yc-conditional}
 yc_cond <- fit_all(ages_yc, "conditional", 1)
-get_min_effect(yc_cond)
+get_effects(yc_cond)
+```
+
+*Quadratic*
+
+```{r}
+yc_quad <- fit_all(ages_yc, "quadratic", 1)
+get_fit(yc_quad)
+
+# No cubic for 2001-cohort; not enough time-points
 ```
 
 ------------------------------------------------------------------------
@@ -895,8 +899,37 @@ get_fit(oc_lin)
 
 ```{r oc-conditional}
 oc_cond <- fit_all(ages_oc, "conditional", 0)
-get_min_effect(oc_cond)
+get_effects(oc_cond)
 ```
+
+*Quadratic and cubic*
+
+```{r}
+oc_quad <- fit_all(ages_oc, "quadratic", 0)
+oc_cubic <- fit_all(ages_oc, "cubic", 0)   
+
+get_fit(oc_quad)
+get_fit(oc_cubic)
+
+# It seems cubic failed to converge for all countries
+```
+
+### Check fit indices
+
+```{r fit-indices}
+bind_rows(
+  get_fit(yc_lin)  |> mutate(cohort = "Younger", model = "Linear"),
+  get_fit(oc_lin)  |> mutate(cohort = "Older",   model = "Linear"),
+  get_fit(yc_quad) |> mutate(cohort = "Younger", model = "Quadratic"),
+  get_fit(oc_quad) |> mutate(cohort = "Older",   model = "Quadratic")
+) |>
+  relocate(country, cohort, model) |>
+  mutate(across(c(cfi, tli, rmsea), ~ round(.x, 3)))
+```
+
+Fit indices are... poor. CFI and TLI are not \>=0.95, RMSEA mostly not \<=0.06 (except Vietnam).
+
+Even for linear the fit is poor, and quadratic does not do any better. Keep linear for parsimony.
 
 ------------------------------------------------------------------------
 
@@ -904,7 +937,7 @@ get_min_effect(oc_cond)
 
 Visualise model-implied trajectories of minority vs majority groups per country
 
-```{r visualise-traj}
+```{r build-plot-traj}
 #| code-fold: true 
 
 # Build implied minority & majority trajectories from a conditional fit
@@ -923,31 +956,33 @@ implied_traj <- function(fit, ages) {
 }
 ```
 
-```{r yc-traj}
-# 2001-cohort
-traj_yc <- imap_dfr(yc_cond, ~ {
-  d <- implied_traj(.x, ages_yc[[.y]])
-  if (is.null(d)) NULL else mutate(d, country = .y)
-})
+```{r plot-traj}
+# combine observed means + model lines, one plot per cohort
+plot_obs_model <- function(fits, ages_list, cohort_val, title) {
+  # model-implied lines
+  model_df <- imap_dfr(fits, function(f, ctry) {
+    d <- implied_traj(f, ages_list[[ctry]])
+    if (is.null(d)) return(NULL)
+    mutate(d, country = ctry)
+  })
+  # observed means
+  obs_df <- imap_dfr(stacked, function(df, ctry) {
+    df |> filter(yc == cohort_val, !is.na(cladder),
+                 equivalent_age %in% ages_list[[ctry]]) |>
+      mutate(group = if_else(minority == "Minority", "Minority", "Majority")) |>
+      group_by(country = ctry, age = equivalent_age, group) |>
+      summarise(mean_cl = mean(cladder), .groups = "drop")
+  })
+  
+  ggplot() +
+    geom_point(data = obs_df, aes(age, mean_cl, colour = group), alpha = 0.6) +
+    geom_line(data = model_df, aes(age, fit, colour = group), linewidth = 1) +
+    facet_wrap(~ country) +
+    scale_colour_manual(values = c("Majority"="#4477AA","Minority"="#CC6677")) +
+    labs(title = title, y = "Life satisfaction", x = "Age", colour = NULL) +
+    theme_minimal()
+}
 
-ggplot(traj_yc, aes(age, fit, colour = group)) +
-  geom_line(linewidth = 1) +
-  facet_wrap(~ country) +
-  labs(title = "2001-Cohort", y = "Life satisfaction", x = "Age", colour = NULL) +
-  scale_colour_manual(values = c("Majority" = "#4477AA", "Minority" = "#CC6677")) +
-  theme_minimal()
-```
-
-```{r oc-traj}
-traj_oc <- imap_dfr(oc_cond, ~ {
-  d <- implied_traj(.x, ages_oc[[.y]])
-  if (is.null(d)) NULL else mutate(d, country = .y)
-})
-
-ggplot(traj_oc, aes(age, fit, colour = group)) +
-  geom_line(linewidth = 1) +
-  facet_wrap(~ country) +
-  labs(title = "1994-Cohort", y = "Life satisfaction", x = "Age", colour = NULL) +
-  scale_colour_manual(values = c("Majority" = "#4477AA", "Minority" = "#CC6677")) +
-  theme_minimal()
+plot_obs_model(yc_cond, ages_yc, 1, "2001-Cohort")
+plot_obs_model(oc_cond, ages_oc, 0, "1994-Cohort")
 ```
