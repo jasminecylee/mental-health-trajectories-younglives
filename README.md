@@ -8,6 +8,7 @@ The data from Young Lives is accessed via the UK Data Service on an end user lic
 
 The structure of the folder is:
 
+```
 mental-health-trajectories-younglives/
 ├── .git/ ← hidden tracking folder
 ├── .gitignore
@@ -16,3 +17,4 @@ mental-health-trajectories-younglives/
 ├── pre-processing.R ← pre-processing script
 ├── analysis.R ← analytical script
 └── data/ ← Young Lives data (ignored by git)
+```

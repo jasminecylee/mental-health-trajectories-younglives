@@ -149,7 +149,7 @@ sdq <- imap(sdq_list, function(df, nm) {
 })
 ```
 
-#### Rescale SDQ
+#### Check and transform SDQ
 
 *Check values*
 
@@ -163,6 +163,14 @@ imap(sdq, function(df, nm) {
   sort(unique(as.numeric(unlist(df[cols]))))
 })
 ```
+
+#### Test measurement invariance
+
+The problem is that across rounds within the same country they use different response options. 
+```{r measurement-invariance}
+```
+
+-------------------
 
 SDQ-E needs to be **rescaled and standardised** as measurement was different across rounds and countries.
 
@@ -299,6 +307,18 @@ add_age <- function(df) {
 }
 
 stacked <- map(merged_data, add_age)
+
+stacked <- map(stacked, \(df) {
+  df |>
+    mutate(sdq = dplyr::case_when(
+      round == 3 ~ emo_r3,
+      round == 4 ~ emo_r4,
+      round == 5 ~ emo_r5,
+      TRUE ~ NA_real_
+    )) |>
+    select(-emo_r3, -emo_r4, -emo_r5)
+})
+names(stacked$ethiopia)   # emo_r3-5 combined into sdq
 ```
 
 ------------------------------------------------------------------------
@@ -787,23 +807,38 @@ We have two cohorts across four countries, so for simplicity we will build a fun
 
 # Build lavaan growth syntax from a vector of ages, centred at the first age.
 # type: "intercept", "linear", or "conditional"
-make_spec <- function(ages, type = "linear") {
-  t <- ages - ages[1]
+make_spec <- function(ages, shape = "linear", conditional = FALSE, extra = NULL) {
+  t    <- (ages - ages[1]) / 10          # decades 
   cols <- paste0("cladder_age", ages)
-  i <- paste0("i =~ ", paste0("1*", cols, collapse = " + "))
-  if (type == "intercept") return(i)
-  s <- paste0("s =~ ", paste0(t, "*", cols, collapse = " + "))
-  spec <- paste(i, s, sep = "\n")
-  if (type %in% c("quadratic","cubic")) {
-    q <- paste0("q =~ ", paste0(t^2, "*", cols, collapse = " + "))
-    spec <- paste(spec, q, sep = "\n")
+  i    <- paste0("i =~ ", paste0("1*", cols, collapse = " + "))
+
+  if (shape == "intercept") {
+    spec <- i; factors <- "i"
+
+  } else if (shape == "basis") {                       # latent-basis (freed-loading)
+    load <- rep("NA", length(ages))                    # middle loadings free
+    load[1] <- "0"; load[length(ages)] <- "1"          # first fixed 0, last fixed 1
+    s <- paste0("s =~ ", paste0(load, "*", cols, collapse = " + "))
+    spec <- paste(i, s, sep = "\n"); factors <- c("i", "s")
+
+  } else {
+    s <- paste0("s =~ ", paste0(t, "*", cols, collapse = " + "))
+    spec <- paste(i, s, sep = "\n"); factors <- c("i", "s")
+    if (shape %in% c("quadratic", "cubic")) {
+      q <- paste0("q =~ ", paste0(t^2, "*", cols, collapse = " + "))
+      spec <- paste(spec, q, sep = "\n"); factors <- c(factors, "q")
+    }
+    if (shape == "cubic") {
+      cub <- paste0("cub =~ ", paste0(t^3, "*", cols, collapse = " + "))
+      spec <- paste(spec, cub, sep = "\n"); factors <- c(factors, "cub")
+    }
   }
-  if (type == "cubic") {
-    cub <- paste0("cub =~ ", paste0(t^3, "*", cols, collapse = " + "))
-    spec <- paste(spec, cub, sep = "\n")
+
+  if (conditional) {
+    spec <- paste(c(spec, paste0(factors, " ~ minority + chsex")), collapse = "\n")
   }
-  if (type == "conditional") {
-    spec <- paste(spec, "i ~ minority + chsex", "s ~ minority + chsex", sep = "\n")
+  if(!is.null(extra)){
+    spec <- paste(c(spec, extra), collapse ="\n")
   }
   spec
 }
@@ -815,9 +850,9 @@ ages_oc <- list(ethiopia = c(12,15,19,22,26,29), india = c(12,15,19,22,26,29),
                 peru = c(12,15,19,22,26,29), vietnam = c(12,15,19,22,26)) # vietnam up to age 26 only
 
 # Fit one model type for one cohort, across all countries
-fit_all <- function(ages_list, type, cohort_val) {
+fit_all <- function(ages_list, shape, cohort_val, conditional = FALSE, constraints = NULL) {
   imap(wide, function(df, ctry) {
-    spec <- make_spec(ages_list[[ctry]], type)
+    spec <- make_spec(ages_list[[ctry]], shape, conditional = conditional, extra = constraints[[ctry]])
     d <- df |> filter(yc == cohort_val, !is.na(minority), !is.na(chsex)) |>
       mutate(minority = as.numeric(minority), chsex = as.numeric(chsex))
     tryCatch(growth(spec, data = d, missing = "fiml"), error = function(e) NULL)
@@ -838,10 +873,20 @@ get_effects <- function(fits) {
     if (is.null(f)) return(NULL)
     if (!lavInspect(f, "converged")) return(NULL)
     parameterEstimates(f) |>
-      filter(rhs %in% c("minority","chsex"), lhs %in% c("i","s")) |>
+      filter(rhs %in% c("minority", "chsex"),
+             lhs %in% c("i", "s", "q", "cub")) |>  
       select(lhs, rhs, est, se, pvalue)
   }
   map_dfr(fits, extract, .id = "country")
+}
+
+check_model <- function(fit) {
+  if (is.null(fit)) return("NULL (errored)")
+  if (!lavInspect(fit, "converged")) return("did not converge")
+  pe   <- parameterEstimates(fit)
+  vars <- pe[pe$op == "~~" & pe$lhs == pe$rhs, ]     # all variances
+  if (any(vars$est < 0)) return("Heywood (negative variance)")
+  "OK"
 }
 ```
 
@@ -864,18 +909,43 @@ get_fit(yc_lin)
 *Conditional model (minority and sex)*
 
 ```{r yc-conditional}
-yc_cond <- fit_all(ages_yc, "conditional", 1)
+yc_cond <- fit_all(ages_yc, "linear", 1, conditional = TRUE)
 get_effects(yc_cond)
 ```
 
 *Quadratic*
 
-```{r}
+```{r quadratic}
 yc_quad <- fit_all(ages_yc, "quadratic", 1)
 get_fit(yc_quad)
 
 # No cubic for 2001-cohort; not enough time-points
 ```
+*Conditional, quadratic*
+```{r yc-conditional-quadratic}
+yc_cond <- fit_all(ages_yc, "quadratic", 1, conditional = TRUE)
+get_effects(yc_cond)
+```
+
+*Basis model*
+```{r yc-basis}
+yc_basis <- fit_all(ages_yc, "basis", 1,
+                    constraints = list(ethiopia = "s ~~ 0*s")) # specify ethiopia constraints separately
+purrr::map_chr(yc_basis, check_model)     
+get_fit(yc_basis)
+
+yc_basis_cond <- fit_all(ages_yc, "basis", 1, conditional = TRUE,
+                   constraints = list(ethiopia = "s ~~ 0*s"))
+get_effects(yc_basis_cond)
+```
+
+We use basis model / freed-loading model because trajectories were not monotonic - it seemed to decline throughout adolescence but partially recover over time. Linear and quadratic models fit poorly, but latent-basis (freed-loading) growth model can estimate the shape of average trajectory from the data rather than imposing a functional form.
+
+In basis models, the first and last factor loadings are fixed to 0 and 1 respectively and in between loadings are freely estimated. Intercept = expected outcome at initial stage; slope = total change across observed age range; estimated loadings = proportion of total change realised at each save. 
+
+Model fit is now substantially improved with the freed-loading specification. 
+
+In Ethiopia 2001-cohort, the slope-factor variance was non-significant and marginally negative (Heywood case), suggesting negligible variability in trajectory of change between individauls. To fit a model we thus have to constrain the slope-factor variance to 0. This only affects estimation of individual differences in slope, not the mean trajectory or estimated minority-majority effects.
 
 ------------------------------------------------------------------------
 
@@ -898,13 +968,13 @@ get_fit(oc_lin)
 *Conditional (minority + sex)*
 
 ```{r oc-conditional}
-oc_cond <- fit_all(ages_oc, "conditional", 0)
+oc_cond <- fit_all(ages_oc, "linear", 0, conditional = TRUE)
 get_effects(oc_cond)
 ```
 
 *Quadratic and cubic*
 
-```{r}
+```{r quad-cub}
 oc_quad <- fit_all(ages_oc, "quadratic", 0)
 oc_cubic <- fit_all(ages_oc, "cubic", 0)   
 
@@ -914,6 +984,22 @@ get_fit(oc_cubic)
 # It seems cubic failed to converge for all countries
 ```
 
+*Conditional, quadratic*
+```{r oc-conditional}
+oc_cond <- fit_all(ages_oc, "quadratic", 0, conditional = TRUE)
+get_effects(oc_cond)
+```
+
+*Basis model*
+```{r oc-basis}
+oc_basis <- fit_all(ages_oc, "basis", 0) 
+purrr::map_chr(oc_basis, check_model) 
+get_fit(oc_basis)
+
+oc_basis_cond <- fit_all(ages_oc, "basis", 0, conditional = TRUE)
+get_effects(oc_basis_cond)
+```
+
 ### Check fit indices
 
 ```{r fit-indices}
@@ -921,7 +1007,9 @@ bind_rows(
   get_fit(yc_lin)  |> mutate(cohort = "Younger", model = "Linear"),
   get_fit(oc_lin)  |> mutate(cohort = "Older",   model = "Linear"),
   get_fit(yc_quad) |> mutate(cohort = "Younger", model = "Quadratic"),
-  get_fit(oc_quad) |> mutate(cohort = "Older",   model = "Quadratic")
+  get_fit(oc_quad) |> mutate(cohort = "Older",   model = "Quadratic"),
+  get_fit(yc_basis) |> mutate(cohort = "Younger", model = "Basis"),
+  get_fit(oc_basis) |> mutate(cohort = "Older", model = "Basis")
 ) |>
   relocate(country, cohort, model) |>
   mutate(across(c(cfi, tli, rmsea), ~ round(.x, 3)))
@@ -936,6 +1024,8 @@ Even for linear the fit is poor, and quadratic does not do any better. Keep line
 ### Trajectory visualisations
 
 Visualise model-implied trajectories of minority vs majority groups per country
+
+#### Linear
 
 ```{r build-plot-traj}
 #| code-fold: true 
@@ -985,4 +1075,139 @@ plot_obs_model <- function(fits, ages_list, cohort_val, title) {
 
 plot_obs_model(yc_cond, ages_yc, 1, "2001-Cohort")
 plot_obs_model(oc_cond, ages_oc, 0, "1994-Cohort")
+```
+
+#### Basis 
+
+```{r traj-basis}
+implied_traj_basis <- function(fit, ages) {
+  if(is.null(fit)) return(NULL)
+  if(!lavInspect(fit, "converged")) return(NULL)
+  
+  est <- parameterEstimates(fit)
+  cols <- paste0("cladder_age", ages)
+  
+  # estimated basis loadings on s (freed loadings), pulled in wave order
+  load <- sapply(cols, function(cc)
+    est$est[est$op == "=~" & est$lhs == "s" & est$rhs == cc])
+  
+  cf <- coef(fit)
+  maj_i <- cf["i~1"]; maj_s <- cf["s~1"]
+  min_i <- maj_i + cf["i~minority"]
+  min_s <- maj_s + cf["s~minority"]
+  
+  tibble(
+    age = rep(ages, 2),
+    group = rep(c("Majority", "Minority"), each = length(ages)),
+    fit = c(maj_i + load * maj_s, # majority: intercept + loading x slope
+            min_i + load * min_s) # minority: same, shifted by minority coefs
+  )
+}
+```
+
+```{r plot-basis}
+plot_obs_model <- function(fits, ages_list, cohort_val, title) {
+  model_df <- imap_dfr(fits, function(f, ctry) {
+    d <- implied_traj_basis(f, ages_list[[ctry]])
+    if (is.null(d)) return(NULL)
+    mutate(d, country = ctry)
+  })
+
+  obs_df <- imap_dfr(stacked, function(df, ctry) {
+    df |> filter(yc == cohort_val, !is.na(cladder),
+                 equivalent_age %in% ages_list[[ctry]]) |>
+      mutate(group = if_else(minority == "Minority", "Minority", "Majority")) |>
+      group_by(country = ctry, age = equivalent_age, group) |>
+      summarise(mean_cl = mean(cladder),
+                se = sd(cladder) / sqrt(n()),          # <- SE of the mean
+                .groups = "drop") |>
+      mutate(lo = mean_cl - 1.96 * se,
+             hi = mean_cl + 1.96 * se)
+  })
+
+  ggplot() +
+    geom_ribbon(data = obs_df,
+                aes(age, ymin = lo, ymax = hi, fill = group),
+                alpha = 0.15, colour = NA) +               # <- the bands
+    geom_point(data = obs_df, aes(age, mean_cl, colour = group), alpha = 0.6) +
+    geom_line(data = model_df, aes(age, fit, colour = group), linewidth = 1) +
+    facet_wrap(~ country) +
+    scale_colour_manual(values = c("Majority" = "#4477AA", "Minority" = "#CC6677")) +
+    scale_fill_manual(values   = c("Majority" = "#4477AA", "Minority" = "#CC6677")) +
+    labs(title = title, y = "Life satisfaction", x = "Age", colour = NULL, fill = NULL) +
+    theme_minimal()
+}
+
+plot_obs_model(yc_basis_cond, ages_yc, 1, "2001-Cohort")
+plot_obs_model(oc_basis_cond, ages_oc, 0, "1994-Cohort")
+```
+
+
+------------------------------------------------------------------------
+## Psychological distress models 
+
+*LGCA helpers*
+
+Only intercept, linear and conditional - no higher order.
+
+```{r lgca-helpers-sdq}
+#| code-fold: true
+
+# Build lavaan growth syntax from a vector of ages, centred at the first age.
+# type: "intercept", "linear", or "conditional"
+make_spec_sdq <- function(ages, shape = "linear", conditional = FALSE, extra = NULL) {
+  t    <- (ages - ages[1]) / 10          # decades 
+  cols <- paste0("sdq_age", ages)
+  i    <- paste0("i =~ ", paste0("1*", cols, collapse = " + "))
+
+  if (shape == "intercept") {
+    spec <- i; factors <- "i"
+
+  } else if (shape == "basis") {                       # latent-basis (freed-loading)
+    load <- rep("NA", length(ages))                    # middle loadings free
+    load[1] <- "0"; load[length(ages)] <- "1"          # first fixed 0, last fixed 1
+    s <- paste0("s =~ ", paste0(load, "*", cols, collapse = " + "))
+    spec <- paste(i, s, sep = "\n"); factors <- c("i", "s")
+
+  } else {
+    s <- paste0("s =~ ", paste0(t, "*", cols, collapse = " + "))
+    spec <- paste(i, s, sep = "\n"); factors <- c("i", "s")
+  }
+
+  if (conditional) {
+    spec <- paste(c(spec, paste0(factors, " ~ minority + chsex")), collapse = "\n")
+  }
+  if(!is.null(extra)){
+    spec <- paste(c(spec, extra), collapse ="\n")
+  }
+  spec
+}
+
+# Ages available per country
+ages_oc <- list(ethiopia = c(15,19,22), india = c(15,19,22),
+                peru = c(15,19,22), vietnam = c(15,19,22)) 
+```
+
+### 1994-cohort age 15-22
+
+*Intercept-only*
+
+```{r oc-intercept-sdq}
+oc_int_sdq <- fit_all(ages_oc, "intercept", 0)
+get_fit(oc_int)
+```
+
+*Linear (intercept + slope)*
+
+```{r oc-linear-sdq}
+oc_lin <- fit_all(ages_oc, "linear", 0)
+get_fit(oc_lin)
+```
+
+
+*Conditional (minority + sex)*
+
+```{r oc-conditional-sdq}
+oc_cond <- fit_all(ages_oc, "linear", 0, conditional = TRUE)
+get_effects(oc_cond)
 ```
