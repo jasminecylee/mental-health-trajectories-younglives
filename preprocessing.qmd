@@ -1211,6 +1211,8 @@ However, from metric -> scalar the change is 0.20 i.e. fail; this is expected be
 
 The only solution is to adopt partial scalar invariance, meaning we constrain the thresholds across 19-22 (same scale) but freely estimate the item thresholds at age 15. This retains all three waves while accounting for measurement change. However we still need to interpret the age 15 latent factor with appropriate caution.
 
+For Ethiopia, India, and Vietnam, it makes sense to have partial invariance structure because of change in threshold across rounds. Interesting that despite uniform scaling across time in Peru full scalar did not hold; for consistency across countries we free age-15 for all, including Peru. Though for Peru the reasons are different - perhaps a developmental (age-related) threshold shift where interpretation of the scale differs across ages.
+
 
 *Partial scalar invariance*
 ```{r partial-scalar-invariance}
@@ -1227,15 +1229,85 @@ list(ethiopia = inv_eth, india = inv_ind, peru = inv_per, vietnam = inv_vnm) |>
 ```
 Partial invariance recovered well for all which is good news! 
 
+### *Growth model*
+
+Second-order growth model built on partial-invariance measurement structure 
+
+```{r growth-model}
+# Growth: intercept + linear slope on three wave-factors
+make_spec_sdq <- function(shape = "linear", conditional = FALSE,
+                          extra = NULL, n_thresh = 3) {
+  waves <- c("15" = "r3", "19" = "r4", "22" = "r5")
+  ages <- c(15, 19, 22)
+  facs <- paste0("e", names(waves))
+  t <- (ages - ages[1]) / 10
+  lines <- character(0)
+  
+  # measurement: metric loadings
+  for (k in seq_along(waves)) {
+    it <-  paste0(sdq_items, "_", waves[k])
+    labs <- paste0("L", seq_along(sdq_items))
+    lines <- c(lines, paste0(facs[k], " =~ ", paste0(labs, "*", it, collapse = " + ")))
+  }
+  
+  # partial scalar thresholds
+  for (itm in sdq_items) {
+    i19 <- paste0(itm, "_r4"); i22 <- paste0(itm, "_r5")
+    for (th in seq_len(n_thresh)) {
+      lbl <- paste0("th", itm, th)
+      lines <- c(lines, paste0(i19, " | ", lbl, "*t", th),
+                        paste0(i22, " | ", lbl, "*t", th))
+    }
+  }
+  
+  # correlated residuals
+  for (itm in sdq_items) {
+    cols <- paste0(itm, "_", waves)
+    lines <- c(lines, paste0(cols[1], " ~~ ", cols[2]),
+               paste0(cols[1], " ~~ ", cols[3]),
+               paste0(cols[2], " ~~ ", cols[3]))
+  }
+  
+  # growth factors on three-wave factors
+  i <- paste0("i =~ ", paste0("1*", facs, collapse = " + "))
+  if (shape == "intercept") { g <- i; gf <- "i" }
+  else {  # linear - only 3 waves
+    s <- paste0("s =~ ", paste0(t, "*", facs, collapse = " + "))
+    g <- paste(i, s, sep = "\n"); gf <- c("i", "s")
+  }
+  lines <- c(lines, g)
+  
+  if (conditional) lines <- c(lines, paste0(gf, " ~ minority + chsex"))
+  if(!is.null(extra)) lines <- c(lines, extra)
+  paste(lines, collapse = "\n")
+}
+
+n_thresh_by_country <- c(ethiopia = 3, india = 3, peru = 2, vietnam = 3)
+
+fit_sdq <- function(shape, conditional = FALSE, constraints = NULL) {
+  items <- as.vector(outer(sdq_items, c("r3","r4","r5"), \(a,b) paste0(a,"_",b)))
+d <- wide$ethiopia |> filter(yc == 0, !is.na(minority), !is.na(chsex)) |>
+  mutate(minority = as.numeric(minority), chsex = as.numeric(chsex))
+spec <- make_spec_sdq("linear", n_thresh = 3)
+cat(spec)          # <- LOOK at the generated syntax first
+lavaan::growth(spec, data = d, ordered = items,
+               estimator = "WLSMV", missing = "pairwise",
+               parameterization = "theta")   # <- see the real error
+}
+```
 
 
 ### *Structural model*
 
-*Intercept-only*
+*Intercept-only and linear*
 
-```{r oc-intercept-sdq}
-oc_int_sdq <- fit_all(ages_oc, "intercept", 0)
-get_fit(oc_int)
+```{r int-lin-sdq}
+sdq_int <- fit_sdq("intercept")
+sdq_lin <- fit_sdq("linear")
+
+purrr::map_chr(sdq_int, check_model)
+purrr::map_chr(sdq_lin, check_model)
+get_fit(sdq_lin)
 ```
 
 *Linear (intercept + slope)*
