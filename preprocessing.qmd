@@ -149,83 +149,33 @@ sdq <- imap(sdq_list, function(df, nm) {
 })
 ```
 
-#### Check and transform SDQ
+#### Check SDQ
 
 *Check values*
 
 ```{r inspect-sdq}
 #| code-fold: true
 
-## Distinct response values in each country-round, pre-rescale
+# Remove missing data 
+missing <- c(77,79,88,99)
+sdq <- imap(sdq, function(df, nm) {
+  rnum <- str_extract(nm, "[3-5]")
+  cols <- paste0(c("headache", "worry", "unhappy", "nervous", "fears"), "_r", rnum)
+  df |> 
+    mutate(across(all_of(cols),
+                  ~ if_else(as.numeric(.x) %in% missing, NA_real_,
+                            as.numeric(.x))))
+})
+
+## Distinct response values in each country-round
 imap(sdq, function(df, nm) {
   rnum <- str_extract(nm, "[3-5]")
   cols <- paste0(c("headache", "worry", "unhappy", "nervous", "fears"), "_r", rnum)
   sort(unique(as.numeric(unlist(df[cols]))))
 })
 ```
+There are different response options depending on rounds - for India, Ethiopia, and Vietnam, round 3 has 3 response options but rounds 4-5 have 4. For Peru, there are 3 response options across time.
 
-#### Test measurement invariance
-
-The problem is that across rounds within the same country they use different response options. 
-```{r measurement-invariance}
-```
-
--------------------
-
-SDQ-E needs to be **rescaled and standardised** as measurement was different across rounds and countries.
-
-- Round 3: 1 - not true for you, 2 - a little true for you, 3 - certainly true for you, 77 - NK, 88 - N/A, 99 - Missing
-
-- Rounds 4 and 5: 1 - strongly disagree, 2 - disagree, 3 - agree, 4 - strongly agree, 77 - NK, 79 - refused to answer
-
-SDQ sub-scale is normally **0 - not true, 1 - somewhat true, 2 - certainly true -\> 10 full score**.
-
-Therefore, scale of 1-3 (round 3) will be rescaled to 0-2. As for scale of 1-4 (rounds 4-5), 1,2 will be collapsed to 0 (not true), 3\>1, and 4-\>2.
-
-The full score will be calculated as the mean of non-missing data \* 5.
-
-*Rescale SDQ*
-
-```{r rescale-sdq}
-
-# Rescale function; unrecognised values (77/79/88/99) fall all become NA
-rescale_3pt <- function(x) case_when(x == 1 ~ 0, x == 2 ~ 1, x == 3 ~ 2, TRUE ~ NA_real_)
-rescale_4pt <- function(x) case_when(x %in% c(1, 2) ~ 0, x == 3 ~ 1, x == 4 ~ 2, TRUE ~ NA_real_)
-
-# Format at R4/R5 (R3 is 3pt for everyone) — all four confirmed against the data
-format_r45 <- c(india = "4pt", peru = "3pt", ethiopia = "4pt", vietnam = "4pt")
-
-sdq <- imap(sdq, function(df, nm) {
-  ctry <- str_extract(nm, "^[a-z]+")
-  rnum <- str_extract(nm, "[3-5]")
-  cols <- paste0(c("headache", "worry", "unhappy", "nervous", "fears"), "_r", rnum)
-  
-  fmt     <- if (rnum == "3") "3pt" else format_r45[[ctry]]
-  rescale <- if (fmt == "3pt") rescale_3pt else rescale_4pt
-  
-  df |>
-    mutate(across(all_of(cols), ~ rescale(as.numeric(.x)))) |>
-    mutate(
-      nonmiss = rowSums(!is.na(across(all_of(cols)))),
-      !!paste0("emo_r", rnum) := if_else(
-        nonmiss > 2, # need to have answered 3 or more out of 5 items to be included
-        round(rowMeans(across(all_of(cols)), na.rm = TRUE) * 5),
-        NA_real_
-      )
-    ) |>
-    select(-nonmiss)
-})
-```
-
-*Check rescaled values*
-
-```{r check-sdq}
-## Check each round's total emotional score is within 0-10 with sensible NA counts
-imap(sdq, function(df, nm) {
-  rnum <- str_extract(nm, "[3-5]")
-  summary(df[[paste0("emo_r", rnum)]])
-})
-```
 
 #### Transform variables
 
@@ -256,15 +206,18 @@ map(data, ~ haven::as_factor(.x$chethnic) |> table(useNA = "always"))
 ```{r country-dataframes}
 #| code-fold: true
 
-# SDQ: one row per child 
+sdq_items <- c("headache", "worry", "unhappy", "nervous", "fears")
+# SDQ: keep individual items as well as total
 sdq_scores <- imap(sdq, function(df, nm) {
-  rnum <- str_extract(nm, "[3-5]")
-  df |> select(childid, !!paste0("emo_r", rnum))
+  rnum  <- str_extract(nm, "[3-5]")
+  items <- paste0(sdq_items, "_r", rnum)          # headache_r3, ... fears_r3
+  total <- paste0("emo_r", rnum)                  # keep the total too 
+  keep  <- intersect(c(items, total), names(df))  # whatever's present
+  df |> select(childid, all_of(keep))
 })
 
 # Merge constructed data and SDQ for each country 
 countries <- c("ethiopia", "india", "peru", "vietnam")
-
 merged_data <- map(countries, function(ctry) {
   base      <- data[[ctry]]
   sdq_files <- sdq_scores[str_starts(names(sdq_scores), paste0(ctry, "_"))]
@@ -309,14 +262,15 @@ add_age <- function(df) {
 stacked <- map(merged_data, add_age)
 
 stacked <- map(stacked, \(df) {
-  df |>
-    mutate(sdq = dplyr::case_when(
-      round == 3 ~ emo_r3,
-      round == 4 ~ emo_r4,
-      round == 5 ~ emo_r5,
+  df |> mutate(
+    # pick the item set for whichever round this row belongs to
+    sdq = dplyr::case_when(
+      round == 3 ~ rowSums(across(all_of(paste0(sdq_items, "_r3"))), na.rm = FALSE),
+      round == 4 ~ rowSums(across(all_of(paste0(sdq_items, "_r4"))), na.rm = FALSE),
+      round == 5 ~ rowSums(across(all_of(paste0(sdq_items, "_r5"))), na.rm = FALSE),
       TRUE ~ NA_real_
-    )) |>
-    select(-emo_r3, -emo_r4, -emo_r5)
+    )
+  )
 })
 names(stacked$ethiopia)   # emo_r3-5 combined into sdq
 ```
@@ -558,107 +512,84 @@ bind_rows(stacked, .id = "country") |>
 
 ### Psychological distress (SDQ-E) - 1994-cohort only
 
-*Overall trajectory*
+We cannot visualise SDQ properly because the measure is not invariant across time so descriptive visualisations would not be comparable. 
 
-```{r overall-traj-sdq}
-#| code-fold: true
+We can only do per-item plots, for each round across countries. In Peru the same scale is used across countries so it can be plotted.
 
-# Mean SDQ-E by age, overall and by group, per country
-plot_trajectory_sdq <- function(df, ctry) {
-  # split version
+```{r sdq-country}
+# Long format: one row per person-item-wave, with the raw response category
+item_long <- imap_dfr(stacked, function(df, ctry) {
   df |>
-    filter(!is.na(sdq), !is.na(equivalent_age)) |>
-    group_by(equivalent_age) |>
-    summarise(mean_cl = mean(sdq), n = n(), .groups = "drop") |>
-    ggplot(aes(equivalent_age, mean_cl)) +
-    geom_line() + geom_point() +
-    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
-    scale_y_continuous(limits = c(0, 10)) +
-    labs(title = ctry, x = "Age", y = "Mean psychological distress") +
-    theme_minimal()
-}
+    filter(yc == 0) |>
+    select(childid, any_of(as.vector(outer(sdq_items, c("r3","r4","r5"),
+                                            \(a,b) paste0(a,"_",b))))) |>
+    pivot_longer(-childid, names_to = "item_wave", values_to = "response") |>
+    filter(!is.na(response)) |>
+    mutate(country = ctry,
+           item = str_remove(item_wave, "_r[3-5]$"),
+           wave = dplyr::recode(str_extract(item_wave, "r[3-5]$"),
+                                r3 = "Age 15", r4 = "Age 19", r5 = "Age 22"))
+})
 
-plots <- imap(stacked, plot_trajectory_sdq)
-wrap_plots(plots, ncol = 2)
-```
+# Proportion in each response category, per country x item x wave
+item_props <- item_long |>
+  count(country, item, wave, response) |>
+  group_by(country, item, wave) |>
+  mutate(prop = n / sum(n)) |>
+  ungroup()
 
-***By minority/majority status***
+# Plot one item at a time (e.g. worry), facet by wave, countries side by side
+item_props |>
+  filter(item == "worry") |>
+  ggplot(aes(x = factor(response), y = prop, fill = wave)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~ country) +
+  labs(title = "SDQ item: worry — response distribution across waves, by country",
+       x = "Response category", y = "Proportion", fill = "Wave") +
+  scale_fill_manual(values = c("Age 15" = "#4477AA",
+                               "Age 19" = "#CC6677",
+                               "Age 22" = "#DDCC77")) +
+  theme_minimal()
 
-```{r traj-min-maj-sdq}
-#| code-fold: true
-
-# Mean SDQ by age, overall and by group, per country
-plot_trajectory_minmaj_sdq <- function(df, ctry) {
-  # split version
-  df |>
-    filter(!is.na(sdq), !is.na(equivalent_age)) |>
-    group_by(equivalent_age, minority) |>
-    summarise(mean_cl = mean(sdq),
-              se = sd(sdq)/sqrt(n()),
-              n = n(), .groups = "drop") |>
-    ggplot(aes(equivalent_age, mean_cl, colour = minority)) +
-    geom_line() + geom_point() +
-    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
-    scale_y_continuous(limits = c(0, 10)) +
-    labs(title = ctry, x = "Age", y = "Mean psychological distress") +
-    scale_colour_manual(values = group_cols) +
-    scale_fill_manual(values = group_cols) +
-    geom_ribbon(aes(ymin = mean_cl - 1.96*se, ymax = mean_cl + 1.96*se, fill = minority), alpha = 0.2, colour = NA) +
-    theme_minimal()
-}
-
-plots <- imap(stacked, plot_trajectory_minmaj_sdq)
-wrap_plots(plots, ncol = 2)
-```
-
-*By sex*
-
-```{r traj-sex-sdq}
-#| code-fold: true
-
-# Mean SDQ by age, overall and by group, per country
-plot_trajectory_sex_sdq <- function(df, ctry) {
-  # split version
-  df |>
-    filter(!is.na(sdq), !is.na(equivalent_age)) |>
-    mutate(chsex = as_factor(chsex)) |> 
-    group_by(equivalent_age, chsex) |>
-    summarise(mean_cl = mean(sdq), n = n(), .groups = "drop") |>
-    ggplot(aes(equivalent_age, mean_cl, colour = chsex)) +
-    geom_line() + geom_point() +
-    scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
-    scale_y_continuous(limits = c(0, 10)) +
-    labs(title = ctry, x = "Age", y = "Mean psychological distress") +
-    theme_minimal()
-}
-
-plots <- imap(stacked, plot_trajectory_sex_sdq)
-wrap_plots(plots, ncol = 2)
-```
-
-*By majority/minority status and sex*
-
-```{r traj-sex-minority-sdq}
-#| code-fold: true
-
-bind_rows(stacked, .id = "country") |>
-  filter(!is.na(sdq), !is.na(equivalent_age)) |>
-  mutate(chsex = as_factor(chsex)) |>
-  group_by(country, equivalent_age, chsex, minority) |>
-  summarise(mean_cl = mean(sdq),
-            se = sd(sdq) / sqrt(n()),
-            .groups = "drop") |>
-  ggplot(aes(equivalent_age, mean_cl, colour = minority, fill = minority)) +
-  geom_ribbon(aes(ymin = mean_cl - 1.96 * se, ymax = mean_cl + 1.96 * se),
-              alpha = 0.2, colour = NA) +
+# Peru only
+# Peru only: mean response per item across waves (scale-consistent, so comparable)
+item_long |>
+  filter(country == "peru") |>
+  group_by(item, wave) |>
+  summarise(mean_resp = mean(response), se = sd(response)/sqrt(n()), .groups = "drop") |>
+  ggplot(aes(x = wave, y = mean_resp, group = item, colour = item)) +
   geom_line() + geom_point() +
-  facet_grid(country ~ chsex) +
-  scale_x_continuous(breaks = c(8, 12, 15, 19, 22, 26, 29)) +
-  scale_y_continuous(limits = c(0, 10)) +
-  scale_colour_manual(values = group_cols) +
-  scale_fill_manual(values = group_cols) +
+  geom_errorbar(aes(ymin = mean_resp - 1.96*se, ymax = mean_resp + 1.96*se), width = 0.1) +
+  labs(title = "Peru: mean SDQ item response across waves (3-point scale throughout)",
+       x = NULL, y = "Mean response (1–3)", colour = "Item") +
   theme_minimal()
 ```
+```{r sdq-maj-min}
+
+# Check size of smallest response category by majority/minority status - are some categories very sparse?
+item_long_grp |>
+  count(country, wave, item, response) |>          # NOT split by group
+  group_by(country, wave, item) |>
+  summarise(min_cell = min(n), .groups = "drop") |>
+  arrange(min_cell) |> head(20)
+
+# Raw counts per response category, split by group — look for tiny cells
+sparse_check <- item_long_grp |>
+  count(country, group, wave, item, response) |>
+  tidyr::pivot_wider(names_from = response, values_from = n, values_fill = 0)
+
+# Flag the worry item as an example; scan all
+sparse_check |> dplyr::filter(item == "worry") |> print(n = Inf)
+
+# Quickest summary: smallest cell per country x group x wave x item
+item_long_grp |>
+  count(country, group, wave, item, response) |>
+  group_by(country, group, wave, item) |>
+  summarise(min_cell = min(n), .groups = "drop") |>
+  arrange(min_cell) |>
+  head(20)
+```
+Looks alright, even for the smallest bin there are 90 people, and enough of individuals from minority group.
 
 ------------------------------------------------------------------------
 
@@ -767,14 +698,22 @@ iwalk(stacked, ~ print(plot_hist(.x, .y, "sdq")))
 ```{r pivot-wide}
 #| code-fold: true
 
+sdq_items <- c("headache","worry","unhappy","nervous","fears")
+item_cols <- as.vector(outer(sdq_items, c("r3","r4","r5"), \(a,b) paste0(a,"_",b)))
+
 to_wide <- function(df) {
-  df |>
+  wide_scores <- df |>
     mutate(chsex = as.numeric(as_factor(chsex)) - 1,  # 0/1
            minority = if_else(minority == "Minority", 1, 0)) |>
-    select(childid, chsex, minority, clustid, yc, equivalent_age, cladder, sdq) |>
+    select(childid, chsex, minority, clustid, yc, equivalent_age, cladder) |>
     pivot_wider(names_from = equivalent_age,
-                values_from = c(cladder, sdq),
-                names_prefix = "age")
+                values_from = cladder,
+                names_prefix = "cladder_age")
+  wide_items <- df |>  # specific sdq items per round
+    select(childid, any_of(item_cols)) |> 
+    group_by(childid) |> 
+    summarise(across(any_of(item_cols), ~first(na.omit(.x))), .groups = "drop")
+  left_join(wide_scores, wide_items, by = "childid")
 }
 wide <- map(stacked, to_wide)
 wide <- map(wide, ~ .x |> group_by(childid) |>
@@ -793,6 +732,7 @@ wide <- map(wide, ~ .x |>
               filter(n_cl >= 3) |> 
               select(-n_cl))
 ```
+
 
 ## Life satisfaction models
 
@@ -844,6 +784,8 @@ make_spec <- function(ages, shape = "linear", conditional = FALSE, extra = NULL)
 }
 
 # Ages available per cohort per country
+ages_comb <- list(ethiopia = c(8,12,15,19,22,26,29), india = c(8,12,15,19,22,26,29),
+                peru = c(8,12,15,19,22,26,29), vietnam = c(8,12,15,19,22,26))
 ages_yc <- list(ethiopia = c(8,12,15,19,22), india = c(8,12,15,19,22),
                 peru = c(8,12,15,19,22), vietnam = c(8,12,15,19)) # vietnam up to age 19 only
 ages_oc <- list(ethiopia = c(12,15,19,22,26,29), india = c(12,15,19,22,26,29),
@@ -852,9 +794,15 @@ ages_oc <- list(ethiopia = c(12,15,19,22,26,29), india = c(12,15,19,22,26,29),
 # Fit one model type for one cohort, across all countries
 fit_all <- function(ages_list, shape, cohort_val, conditional = FALSE, constraints = NULL) {
   imap(wide, function(df, ctry) {
-    spec <- make_spec(ages_list[[ctry]], shape, conditional = conditional, extra = constraints[[ctry]])
-    d <- df |> filter(yc == cohort_val, !is.na(minority), !is.na(chsex)) |>
+    spec <- make_spec(ages_list[[ctry]], shape, conditional = conditional,
+                      extra = constraints[[ctry]])
+    if (!identical(cohort_val, "all")) {
+      df <- filter(df, yc == cohort_val)
+    }
+    d <- df |>
+      filter(!is.na(minority), !is.na(chsex)) |>
       mutate(minority = as.numeric(minority), chsex = as.numeric(chsex))
+
     tryCatch(growth(spec, data = d, missing = "fiml"), error = function(e) NULL)
   })
 }
@@ -862,8 +810,14 @@ fit_all <- function(ages_list, shape, cohort_val, conditional = FALSE, constrain
 get_fit <- function(fits) {
   extract <- function(f) {
     if (is.null(f)) return(NULL)
-    if (!lavInspect(f, "converged")) return(NULL)   # skip non-converged
-    as_tibble(as.list(fitMeasures(f, c("cfi","tli","rmsea"))))
+    if (!lavInspect(f, "converged")) return(NULL)
+    as_tibble(as.list(fitMeasures(f, c(
+      "chisq", "df", "pvalue",           # model chi-square
+      "cfi", "tli",
+      "rmsea", "rmsea.ci.lower", "rmsea.ci.upper",   # RMSEA + its 90% CI
+      "srmr",                           
+      "aic", "bic", "bic2"               # bic2 = sample-size-adjusted BIC
+    ))))
   }
   map_dfr(fits, extract, .id = "country")
 }
@@ -888,6 +842,42 @@ check_model <- function(fit) {
   if (any(vars$est < 0)) return("Heywood (negative variance)")
   "OK"
 }
+```
+
+### Combined cohort
+
+*Intercept only*
+
+```{r combined}
+comb_lin   <- fit_all(ages_comb, "linear",    "all")
+comb_quad  <- fit_all(ages_comb, "quadratic", "all")
+comb_basis <- fit_all(ages_comb, "basis",     "all", constraints = list(india = "s ~~ 0*s")) # slope-factor variance was -0.002, need to constraint so model fits
+
+fit_table <- function(fits, model) {
+  tibble(country = names(fits)) |>
+    mutate(status = purrr::map_chr(fits, check_model)) |>
+    left_join(get_fit(fits), by = "country") |>
+    mutate(model = model)
+}
+
+# Compare models
+bind_rows(
+  fit_table(comb_lin,   "Linear"),
+  fit_table(comb_quad,  "Quadratic"),
+  fit_table(comb_basis, "Basis")
+) |>
+  relocate(country, model, status) |>
+  mutate(
+    across(c(cfi, tli, srmr, rmsea, rmsea.ci.lower, rmsea.ci.upper), ~ round(.x, 3)),
+    across(c(chisq, aic, bic, bic2), ~ round(.x, 1)),
+    pvalue = round(pvalue, 3)
+  ) |>
+  arrange(model, factor(model, levels = c("Linear", "Quadratic", "Basis")))
+
+# Conditional model
+comb_cond <- fit_all(ages_comb, "basis", "all", conditional = TRUE,
+                     constraints = list(india = "s ~~ 0*s"))  
+get_effects(comb_cond)
 ```
 
 ### 2001-cohort age 8-22
@@ -921,13 +911,16 @@ get_fit(yc_quad)
 
 # No cubic for 2001-cohort; not enough time-points
 ```
+
 *Conditional, quadratic*
+
 ```{r yc-conditional-quadratic}
 yc_cond <- fit_all(ages_yc, "quadratic", 1, conditional = TRUE)
 get_effects(yc_cond)
 ```
 
 *Basis model*
+
 ```{r yc-basis}
 yc_basis <- fit_all(ages_yc, "basis", 1,
                     constraints = list(ethiopia = "s ~~ 0*s")) # specify ethiopia constraints separately
@@ -941,9 +934,9 @@ get_effects(yc_basis_cond)
 
 We use basis model / freed-loading model because trajectories were not monotonic - it seemed to decline throughout adolescence but partially recover over time. Linear and quadratic models fit poorly, but latent-basis (freed-loading) growth model can estimate the shape of average trajectory from the data rather than imposing a functional form.
 
-In basis models, the first and last factor loadings are fixed to 0 and 1 respectively and in between loadings are freely estimated. Intercept = expected outcome at initial stage; slope = total change across observed age range; estimated loadings = proportion of total change realised at each save. 
+In basis models, the first and last factor loadings are fixed to 0 and 1 respectively and in between loadings are freely estimated. Intercept = expected outcome at initial stage; slope = total change across observed age range; estimated loadings = proportion of total change realised at each save.
 
-Model fit is now substantially improved with the freed-loading specification. 
+Model fit is now substantially improved with the freed-loading specification.
 
 In Ethiopia 2001-cohort, the slope-factor variance was non-significant and marginally negative (Heywood case), suggesting negligible variability in trajectory of change between individauls. To fit a model we thus have to constrain the slope-factor variance to 0. This only affects estimation of individual differences in slope, not the mean trajectory or estimated minority-majority effects.
 
@@ -985,12 +978,14 @@ get_fit(oc_cubic)
 ```
 
 *Conditional, quadratic*
+
 ```{r oc-conditional}
 oc_cond <- fit_all(ages_oc, "quadratic", 0, conditional = TRUE)
 get_effects(oc_cond)
 ```
 
 *Basis model*
+
 ```{r oc-basis}
 oc_basis <- fit_all(ages_oc, "basis", 0) 
 purrr::map_chr(oc_basis, check_model) 
@@ -1017,67 +1012,13 @@ bind_rows(
 
 Fit indices are... poor. CFI and TLI are not \>=0.95, RMSEA mostly not \<=0.06 (except Vietnam).
 
-Even for linear the fit is poor, and quadratic does not do any better. Keep linear for parsimony.
+Even for linear the fit is poor, and quadratic does not do any better. Basis better?
 
 ------------------------------------------------------------------------
 
 ### Trajectory visualisations
 
-Visualise model-implied trajectories of minority vs majority groups per country
-
-#### Linear
-
-```{r build-plot-traj}
-#| code-fold: true 
-
-# Build implied minority & majority trajectories from a conditional fit
-implied_traj <- function(fit, ages) {
-  if (is.null(fit)) return(NULL)
-  cf <- coef(fit)
-  t <- ages - ages[1]
-  # majority = reference (minority=0, sex held at 0); minority adds its coef
-  maj_i <- cf["i~1"]; maj_s <- cf["s~1"]
-  min_i <- maj_i + cf["i~minority"]; min_s <- maj_s + cf["s~minority"]
-  tibble(
-    age = rep(ages, 2),
-    group = rep(c("Majority","Minority"), each = length(ages)),
-    fit = c(maj_i + maj_s*t, min_i + min_s*t)
-  )
-}
-```
-
-```{r plot-traj}
-# combine observed means + model lines, one plot per cohort
-plot_obs_model <- function(fits, ages_list, cohort_val, title) {
-  # model-implied lines
-  model_df <- imap_dfr(fits, function(f, ctry) {
-    d <- implied_traj(f, ages_list[[ctry]])
-    if (is.null(d)) return(NULL)
-    mutate(d, country = ctry)
-  })
-  # observed means
-  obs_df <- imap_dfr(stacked, function(df, ctry) {
-    df |> filter(yc == cohort_val, !is.na(cladder),
-                 equivalent_age %in% ages_list[[ctry]]) |>
-      mutate(group = if_else(minority == "Minority", "Minority", "Majority")) |>
-      group_by(country = ctry, age = equivalent_age, group) |>
-      summarise(mean_cl = mean(cladder), .groups = "drop")
-  })
-  
-  ggplot() +
-    geom_point(data = obs_df, aes(age, mean_cl, colour = group), alpha = 0.6) +
-    geom_line(data = model_df, aes(age, fit, colour = group), linewidth = 1) +
-    facet_wrap(~ country) +
-    scale_colour_manual(values = c("Majority"="#4477AA","Minority"="#CC6677")) +
-    labs(title = title, y = "Life satisfaction", x = "Age", colour = NULL) +
-    theme_minimal()
-}
-
-plot_obs_model(yc_cond, ages_yc, 1, "2001-Cohort")
-plot_obs_model(oc_cond, ages_oc, 0, "1994-Cohort")
-```
-
-#### Basis 
+Visualise model-implied trajectories of minority vs majority groups per country, using basis model.
 
 ```{r traj-basis}
 implied_traj_basis <- function(fit, ages) {
@@ -1142,53 +1083,153 @@ plot_obs_model(yc_basis_cond, ages_yc, 1, "2001-Cohort")
 plot_obs_model(oc_basis_cond, ages_oc, 0, "1994-Cohort")
 ```
 
-
 ------------------------------------------------------------------------
-## Psychological distress models 
 
-*LGCA helpers*
+## Psychological distress models
 
-Only intercept, linear and conditional - no higher order.
+With SDQ we will do both a measurement and structural model together, because the response options are different across ages within the same country, we will construct a latent variable emotional symptoms using the five SDQ items for each timepoint, and moel that.
 
-```{r lgca-helpers-sdq}
+WLSMV (Weighted Least Squares Mean and Variance) - for CFA here; SDQ-E is ordinal.
+
+### *Measurement model*
+
+*Create latent variable SDQ-E using 5 individual items* 
+Per wave per country
+```{r measurement-model-sdq}
 #| code-fold: true
 
-# Build lavaan growth syntax from a vector of ages, centred at the first age.
-# type: "intercept", "linear", or "conditional"
-make_spec_sdq <- function(ages, shape = "linear", conditional = FALSE, extra = NULL) {
-  t    <- (ages - ages[1]) / 10          # decades 
-  cols <- paste0("sdq_age", ages)
-  i    <- paste0("i =~ ", paste0("1*", cols, collapse = " + "))
-
-  if (shape == "intercept") {
-    spec <- i; factors <- "i"
-
-  } else if (shape == "basis") {                       # latent-basis (freed-loading)
-    load <- rep("NA", length(ages))                    # middle loadings free
-    load[1] <- "0"; load[length(ages)] <- "1"          # first fixed 0, last fixed 1
-    s <- paste0("s =~ ", paste0(load, "*", cols, collapse = " + "))
-    spec <- paste(i, s, sep = "\n"); factors <- c("i", "s")
-
-  } else {
-    s <- paste0("s =~ ", paste0(t, "*", cols, collapse = " + "))
-    spec <- paste(i, s, sep = "\n"); factors <- c("i", "s")
-  }
-
-  if (conditional) {
-    spec <- paste(c(spec, paste0(factors, " ~ minority + chsex")), collapse = "\n")
-  }
-  if(!is.null(extra)){
-    spec <- paste(c(spec, extra), collapse ="\n")
-  }
-  spec
+# Confirmatory factor analysis
+fit_cfa_wave <- function(df, r) {
+  items <- paste0(sdq_items, "_", r)
+  spec  <- paste0("emo =~ ", paste(items, collapse = " + "))
+  d <- df |> filter(yc == 0)                    # older cohort only
+  tryCatch(
+    lavaan::cfa(spec, data = d, ordered = items,
+                estimator = "WLSMV", missing = "pairwise"),
+    error = function(e) NULL)
 }
 
-# Ages available per country
-ages_oc <- list(ethiopia = c(15,19,22), india = c(15,19,22),
-                peru = c(15,19,22), vietnam = c(15,19,22)) 
+# All countries for all 3 waves
+cfa_singlewave <- imap(wide, function(df, ctry) {
+  list(age15 = fit_cfa_wave(df, "r3"),
+       age19 = fit_cfa_wave(df, "r4"),
+       age22 = fit_cfa_wave(df, "r5"))
+})
+purrr::map(cfa_singlewave, ~ purrr::map_chr(.x, check_model))
+
+# Check fit and loadings
+purrr::imap(cfa_singlewave, function(waves, ctry) {
+  purrr::map_dfr(waves, function(f) as_tibble(as.list(fitMeasures(f, c("cfi","tli","rmsea","srmr")))),
+                 .id = "wave") |> mutate(country = ctry)
+})
+
+# Example: Ethiopia age 15 — should all be positive, ideally >.5
+standardizedSolution(cfa_singlewave$ethiopia$age15) |>
+  dplyr::filter(op == "=~") |> dplyr::select(rhs, est.std, pvalue)
 ```
 
-### 1994-cohort age 15-22
+*Test longitudinal invariance*
+```{r sdq-invariance}
+#| code-fold: true
+
+# 3-wave longitudinal CFA at a given invariance level 
+# level: "configural" (nothing constrained), "metric" (loadings equal), "scalar "loadings + thresholds equal)
+# n_thresh = number of thresholds a country's items have at waves 19/22 - Peru is 3pt i.e. 2 thresholds, remaining are 4pt i.e. 3 thresholds
+
+make_long_cfa <- function(level = "configural", n_thresh = 3) {
+  waves <- c("15" = "r3", "19" = "r4", "22" = "r5")
+  facs <- paste0("e", names(waves)) # e15, e19, e22
+  lines <- character(0)
+  
+  # measurement model per wave
+  for (k in seq_along(waves)) {
+    it <- paste0(sdq_items, "_", waves[k])
+    labs <- if(level == "configural") paste0("L", seq_along(sdq_items), "_w", k)
+            else                      paste0("L", seq_along(sdq_items)) 
+    lines <- c(lines, paste0(facs[k], " =~ ", paste0(labs, "*", it, collapse = " + ")))
+  }
+  
+  # full scalar
+  if(level == "scalar") {
+    for (itm in sdq_items) {
+      # constrain shared thresholds across three waves
+      i15 <- paste0(itm, "_r3"); i19 <- paste0(itm, "_r4"); i22 <- paste0(itm, "_r5")
+      lines <- c(lines,
+                 paste0(i15, " | th1*t1"), paste0(i19, " | th1*t1"), paste0(i22, " | th1*t1"),
+                 paste0(i15, " | th2*t2"), paste0(i19, " | th2*t2"), paste0(i22, " | th2*t2"))
+    }
+  }
+  if(level == "partial") {
+    # partial scalar, free age 15
+    for (itm in sdq_items) {
+      i19 <- paste0(itm,"_r4"); i22 <- paste0(itm,"_r5")
+      for (th in seq_len(n_thresh)) { # 2 for Peru, 3 for others
+        lbl <- paste0("th", itm, th)
+        lines <- c(lines,
+                 paste0(i19, " | ", lbl, "*t", th), 
+                 paste0(i22, " | ", lbl, "*t", th)) 
+                 # age 15 not listed so can be freely estimated
+    }
+    }
+  }    
+  
+  # correlated residuals
+  for (itm in sdq_items) {
+    cols <- paste0(itm, "_", waves)
+    lines <- c(lines,
+               paste0(cols[1], " ~~ ", cols[2]),
+               paste0(cols[1], " ~~ ", cols[3]),
+               paste0(cols[2], " ~~ ", cols[3]))
+  }
+  paste(lines, collapse = "\n")
+}
+
+# Fit all four levels for one country; n_thresh set per country
+fit_invariance <- function(df, n_thresh = 3) {
+  items <- as.vector(outer(sdq_items, c("r3", "r4", "r5"), \(a,b) paste0(a,"_",b)))
+  d <- df |> filter(yc==0)
+  fit_one <- function(level)
+    tryCatch(
+    lavaan::cfa(make_long_cfa(level, n_thresh = n_thresh), data = d, ordered = items,
+                estimator = "WLSMV", missing = "pairwise",
+                parameterization = "theta"),
+    error = function(e) NULL)
+  list(
+    configural = fit_one("configural"),
+    metric = fit_one("metric"),
+    scalar = fit_one("scalar"),
+    partial = fit_one("partial"))
+}
+
+# per country threshold count
+n_thresh_by_country <- c(ethiopia = 3, india = 3, peru = 2, vietnam = 3)
+```
+
+The drop from configural -> metric is ~0.01 so that's okay. Configural and metric invariance hold - SDQ-E measures the same construct across the three waves.
+
+However, from metric -> scalar the change is 0.20 i.e. fail; this is expected because of the change in threshold for three countries, from a 3pt to 4pt response. Age 15 SDQ is not comparable to 19/22. 
+
+The only solution is to adopt partial scalar invariance, meaning we constrain the thresholds across 19-22 (same scale) but freely estimate the item thresholds at age 15. This retains all three waves while accounting for measurement change. However we still need to interpret the age 15 latent factor with appropriate caution.
+
+
+*Partial scalar invariance*
+```{r partial-scalar-invariance}
+
+inv_eth <- fit_invariance(wide$ethiopia, n_thresh = n_thresh_by_country["ethiopia"])
+inv_ind <- fit_invariance(wide$india,    n_thresh = n_thresh_by_country["india"])
+inv_per <- fit_invariance(wide$peru,     n_thresh = n_thresh_by_country["peru"])
+inv_vnm <- fit_invariance(wide$vietnam,  n_thresh = n_thresh_by_country["vietnam"])
+
+# admissibility + the full configural -> metric -> scalar -> partial table per country
+list(ethiopia = inv_eth, india = inv_ind, peru = inv_per, vietnam = inv_vnm) |>
+  purrr::imap_dfr(function(inv, ctry)
+    compare_invariance(inv) |> mutate(country = ctry))
+```
+Partial invariance recovered well for all which is good news! 
+
+
+
+### *Structural model*
 
 *Intercept-only*
 
@@ -1203,7 +1244,6 @@ get_fit(oc_int)
 oc_lin <- fit_all(ages_oc, "linear", 0)
 get_fit(oc_lin)
 ```
-
 
 *Conditional (minority + sex)*
 
