@@ -174,8 +174,8 @@ imap(sdq, function(df, nm) {
   sort(unique(as.numeric(unlist(df[cols]))))
 })
 ```
-There are different response options depending on rounds - for India, Ethiopia, and Vietnam, round 3 has 3 response options but rounds 4-5 have 4. For Peru, there are 3 response options across time.
 
+There are different response options depending on rounds - for India, Ethiopia, and Vietnam, round 3 has 3 response options but rounds 4-5 have 4. For Peru, there are 3 response options across time.
 
 #### Transform variables
 
@@ -512,7 +512,7 @@ bind_rows(stacked, .id = "country") |>
 
 ### Psychological distress (SDQ-E) - 1994-cohort only
 
-We cannot visualise SDQ properly because the measure is not invariant across time so descriptive visualisations would not be comparable. 
+We cannot visualise SDQ properly because the measure is not invariant across time so descriptive visualisations would not be comparable.
 
 We can only do per-item plots, for each round across countries. In Peru the same scale is used across countries so it can be plotted.
 
@@ -564,6 +564,7 @@ item_long |>
        x = NULL, y = "Mean response (1–3)", colour = "Item") +
   theme_minimal()
 ```
+
 ```{r sdq-maj-min}
 
 # Check size of smallest response category by majority/minority status - are some categories very sparse?
@@ -589,6 +590,7 @@ item_long_grp |>
   arrange(min_cell) |>
   head(20)
 ```
+
 Looks alright, even for the smallest bin there are 90 people, and enough of individuals from minority group.
 
 ------------------------------------------------------------------------
@@ -732,7 +734,6 @@ wide <- map(wide, ~ .x |>
               filter(n_cl >= 3) |> 
               select(-n_cl))
 ```
-
 
 ## Life satisfaction models
 
@@ -1093,8 +1094,8 @@ WLSMV (Weighted Least Squares Mean and Variance) - for CFA here; SDQ-E is ordina
 
 ### *Measurement model*
 
-*Create latent variable SDQ-E using 5 individual items* 
-Per wave per country
+*Create latent variable SDQ-E using 5 individual items* Per wave per country
+
 ```{r measurement-model-sdq}
 #| code-fold: true
 
@@ -1129,6 +1130,7 @@ standardizedSolution(cfa_singlewave$ethiopia$age15) |>
 ```
 
 *Test longitudinal invariance*
+
 ```{r sdq-invariance}
 #| code-fold: true
 
@@ -1205,16 +1207,16 @@ fit_invariance <- function(df, n_thresh = 3) {
 n_thresh_by_country <- c(ethiopia = 3, india = 3, peru = 2, vietnam = 3)
 ```
 
-The drop from configural -> metric is ~0.01 so that's okay. Configural and metric invariance hold - SDQ-E measures the same construct across the three waves.
+The drop from configural -\> metric is \~0.01 so that's okay. Configural and metric invariance hold - SDQ-E measures the same construct across the three waves.
 
-However, from metric -> scalar the change is 0.20 i.e. fail; this is expected because of the change in threshold for three countries, from a 3pt to 4pt response. Age 15 SDQ is not comparable to 19/22. 
+However, from metric -\> scalar the change is 0.20 i.e. fail; this is expected because of the change in threshold for three countries, from a 3pt to 4pt response. Age 15 SDQ is not comparable to 19/22.
 
 The only solution is to adopt partial scalar invariance, meaning we constrain the thresholds across 19-22 (same scale) but freely estimate the item thresholds at age 15. This retains all three waves while accounting for measurement change. However we still need to interpret the age 15 latent factor with appropriate caution.
 
 For Ethiopia, India, and Vietnam, it makes sense to have partial invariance structure because of change in threshold across rounds. Interesting that despite uniform scaling across time in Peru full scalar did not hold; for consistency across countries we free age-15 for all, including Peru. Though for Peru the reasons are different - perhaps a developmental (age-related) threshold shift where interpretation of the scale differs across ages.
 
-
 *Partial scalar invariance*
+
 ```{r partial-scalar-invariance}
 
 inv_eth <- fit_invariance(wide$ethiopia, n_thresh = n_thresh_by_country["ethiopia"])
@@ -1227,11 +1229,12 @@ list(ethiopia = inv_eth, india = inv_ind, peru = inv_per, vietnam = inv_vnm) |>
   purrr::imap_dfr(function(inv, ctry)
     compare_invariance(inv) |> mutate(country = ctry))
 ```
-Partial invariance recovered well for all which is good news! 
+
+Partial invariance recovered well for all which is good news!
 
 ### *Growth model*
 
-Second-order growth model built on partial-invariance measurement structure 
+Second-order growth model built on partial-invariance measurement structure
 
 ```{r growth-model}
 # Growth: intercept + linear slope on three wave-factors
@@ -1286,40 +1289,146 @@ n_thresh_by_country <- c(ethiopia = 3, india = 3, peru = 2, vietnam = 3)
 
 fit_sdq <- function(shape, conditional = FALSE, constraints = NULL) {
   items <- as.vector(outer(sdq_items, c("r3","r4","r5"), \(a,b) paste0(a,"_",b)))
-d <- wide$ethiopia |> filter(yc == 0, !is.na(minority), !is.na(chsex)) |>
-  mutate(minority = as.numeric(minority), chsex = as.numeric(chsex))
-spec <- make_spec_sdq("linear", n_thresh = 3)
-cat(spec)          # <- LOOK at the generated syntax first
-lavaan::growth(spec, data = d, ordered = items,
-               estimator = "WLSMV", missing = "pairwise",
-               parameterization = "theta")   # <- see the real error
+  imap(wide, function(df, ctry) {                    # loops over 4 countries
+    d <- df |> filter(yc == 0, !is.na(minority), !is.na(chsex)) |>
+      mutate(minority = as.numeric(minority), chsex = as.numeric(chsex))
+    spec <- make_spec_sdq(shape, conditional, extra = constraints[[ctry]],
+                           n_thresh = n_thresh_by_country[[ctry]])
+    tryCatch(
+      lavaan::growth(spec, data = d, ordered = items, estimator = "WLSMV",
+                     missing = "pairwise", parameterization = "theta"),
+      error = function(e) NULL)
+  })
 }
 ```
 
-
-### *Structural model*
+### Structural model
 
 *Intercept-only and linear*
 
 ```{r int-lin-sdq}
 sdq_int <- fit_sdq("intercept")
-sdq_lin <- fit_sdq("linear")
+sdq_lin <- fit_sdq("linear", constraints = list(
+  ethiopia = "i ~~ 0*i", # intercept variance going negative, need to constrain
+  india = "s ~~ 0*s")) # slope variance constrained
 
 purrr::map_chr(sdq_int, check_model)
 purrr::map_chr(sdq_lin, check_model)
 get_fit(sdq_lin)
 ```
 
-*Linear (intercept + slope)*
+In Ethiopia, intercept variance was non-significant and marginally negative (Heywood case), so we constrained to 0 - indicating negligible estimable individual variability in baseline SDQ-E. Avoided inadmissible solution. In India, slope variance was similarly constrained, reflecting the limited capacity of a 3-wave model to estimate individual differences in growth factors.
 
-```{r oc-linear-sdq}
-oc_lin <- fit_all(ages_oc, "linear", 0)
-get_fit(oc_lin)
-```
+Given we only have 3 waves, a higher-order or freed-loading trajectory shape was not estimable. We specify only a linear slope, and the linear model fits well according to indices - CFI 0.96-0.99, RMSEA \<=0.043, SRMR \~0.05.
 
 *Conditional (minority + sex)*
 
-```{r oc-conditional-sdq}
-oc_cond <- fit_all(ages_oc, "linear", 0, conditional = TRUE)
-get_effects(oc_cond)
+```{r conditional-sdq}
+sdq_cond <- fit_sdq("linear", conditional = TRUE, constraints = list(
+  ethiopia = "i ~~ 0*i",
+  india    = "s ~~ 0*s"))
+purrr::map_chr(sdq_cond, check_model)  
+get_effects(sdq_cond)
 ```
+
+### Trajectory visualisations
+
+*Plot latent factor trajectory*
+
+SDQ is not a latent factor and not observed score, which means we are plotting the model-implied latent factor means at each wave.
+
+**By religious minority/majority**
+
+```{r traj-sdq-rel}
+implied_traj_sdq <- function(fit, ages = c(15,19,22)) {
+  if (is.null(fit) || !lavInspect(fit, "converged")) return(NULL)
+  cf <- coef(fit)
+  t <- (ages - ages[1]) / 10 # 0, 0.4, 0.7 - matches slope coding
+  
+  # intercept and slope means for reference
+  maj_i <- cf[["i~1"]]; maj_s <- cf[["s~1"]]
+  # minority (holding sex=0)
+  min_i <- maj_i + cf[["i~minority"]]
+  min_s <- maj_s + cf[["s~minority"]]
+  
+  tibble(
+    age = rep(ages,2),
+    group = rep(c("Majority", "Minority"), each = length(ages)),
+    fit = c(maj_i + maj_s * t, min_i + min_s * t)
+  )
+}
+
+sdq_model_df <- imap_dfr(sdq_cond, function(f, ctry) {
+  d <- implied_traj_sdq(f)
+  if (is.null(d)) return(NULL)
+  mutate(d, country = ctry)
+})
+
+sdq_annot <- get_effects(sdq_cond) |>
+  dplyr::filter(lhs == "s", rhs == "minority") |>
+  dplyr::mutate(label = paste0("Minority slope p = ", sprintf("%.2f", pvalue)))
+
+ggplot(sdq_model_df, aes(age, fit, colour = group)) +
+  geom_line(linewidth = 1) + 
+  geom_point() +
+  geom_text(data = sdq_annot, aes(x = 15, y = Inf, label = label), colour = "grey30", hjust = 0, vjust = 1.4, size = 3, inherit.aes = FALSE) +
+  facet_wrap(~ country) +
+  scale_colour_manual(values = c("Majority" = "#4477AA", "Minority" = "#CC6677")) +
+  scale_x_continuous(breaks = c(15, 19, 22)) +
+  labs(title = "Psychological distress (SDQ-E) model-implied latent trajectories",
+       subtitle = "Religious minority vs majority latent trajectories",
+       caption = "Higher values indicate greater distress. Estimates adjust for sex. Trajectories are model-implied estimates.",
+       y = "Latent psychological distress (model-implied)", x = "Age", colour = NULL) +
+  theme_minimal()
+```
+
+**By sex**
+
+```{r traj-sdq-sex}
+implied_traj_sex <- function(fit, ages = c(15, 19, 22)) {
+  if (is.null(fit) || !lavInspect(fit, "converged")) return(NULL)
+  cf <- coef(fit)
+  t <- (ages - ages[1]) / 10
+  
+  male_i <- cf[["i~1"]]; male_s <- cf[["s~1"]] # reference: male, religous majority
+  # minority (holding minority=0)
+  fem_i <- male_i + cf[["i~chsex"]]
+  fem_s <- male_s + cf[["s~chsex"]]
+  
+  tibble(
+    age = rep(ages,2),
+    group = rep(c("Male", "Female"), each = length(ages)),
+    fit = c(male_i + male_s * t, fem_i + fem_s * t)
+  )
+}
+
+sdq_sex_df <- imap_dfr(sdq_cond, function(f, ctry) {
+  d <- implied_traj_sex(f)
+  if (is.null(d)) return(NULL)
+  mutate(d, country = ctry)
+})
+
+sdq_sex_annot <- get_effects(sdq_cond) |> 
+  dplyr::filter(lhs == "s", rhs == "chsex") |> 
+  dplyr::mutate(label = paste0("Slope p = ", sprintf("%.3f", pvalue)))
+
+ggplot(sdq_sex_df, aes(age, fit, colour = group)) +
+  geom_line(linewidth = 1) + 
+  geom_point() +
+  geom_text(data = sdq_sex_annot, aes(x = 15, y = Inf, label = label), colour = "grey30", hjust = 0, vjust = 1.4, size = 3, inherit.aes = FALSE) +
+  facet_wrap(~ country) +
+  scale_colour_manual(values = c("Male" = "#009E73", "Female" = "#E69F00")) +
+  scale_x_continuous(breaks = c(15, 19, 22)) +
+  labs(title = "Psychological distress (SDQ-E) model-implied latent trajectories",
+       caption = "Higher values indicate greater distress. Estimates adjust for religious minority status.",
+       y = "Latent psychological distress (model-implied)", x = "Age", colour = NULL) +
+  theme_minimal()
+```
+
+- **Ethiopia**: similar distress at age 15 (intercept b=-0.10, p=.065), but girls' distress increased significantly faster than boys (slope b=0.55, p\<.001).
+
+- **India**: girls higher distress at 15 (intercept b=0.66, p\<.001) with no difference in change over time.
+
+- **Peru**: boys higher distress at 15 (intercept b=-0.46, -\<.001) and worsened more quickly than girls over time (slope b=-0.48, p=.002).
+
+- **Vietnam**: girls higher distress at 15 (intercept b=0.26, p\<.001) with no difference over time.
